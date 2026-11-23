@@ -1,0 +1,18 @@
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  base: './',
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          includeDependenciesRecursively: false,
+          groups: [
+            { name: 'three-core', test: /\/three\/build\/three\.core\.js$/ },
+            { name: 'three-webgl', test: /\/three\/build\/three\.module\.js$/ },
+          ],
+        },
+      },
+    },
+  },
+});
