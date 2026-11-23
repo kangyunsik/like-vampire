@@ -20,6 +20,10 @@ import { prepareStageTrial, stageTrial, type StageTrial } from './stage-trial';
 import { World } from './world/scene';
 
 const stageParams = import.meta.env.DEV ? new URLSearchParams(location.search) : null;
+const classOrder = ['fire', 'frost'] as const;
+const savedClass = readSetting('class', classOrder[0]);
+let selectedClass: MageClass = classOrder.find((id) => id === savedClass) ?? classOrder[0];
+const initialMage = MAGE_CLASSES[selectedClass];
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -53,7 +57,7 @@ app.innerHTML = `
       </div>
     </section>
 
-    <section class="arena" id="arena" aria-label="${STAGES[0].name} 3D 전장" data-state="menu" data-stage="${STAGES[0].id}">
+    <section class="arena" id="arena" aria-label="${STAGES[0].name} 3D 전장" data-state="menu" data-stage="${STAGES[0].id}" data-mage-class="${selectedClass}">
       <div class="viewport" id="viewport" aria-hidden="true"></div>
       <canvas class="damage-canvas" id="damage-canvas" aria-hidden="true"></canvas>
       <div class="arena-shade" aria-hidden="true"></div>
@@ -106,10 +110,10 @@ app.innerHTML = `
       </div>
       <div class="arena-intro" id="arena-intro">
         <div class="class-picker" role="group" aria-label="마법사 특성 선택">
-          ${(['frost', 'fire'] as const).map((id) => `<button class="class-chip" data-class="${id}" type="button" aria-pressed="${id === 'frost'}">${icon(id === 'frost' ? 'snow' : 'flame', 15)} ${MAGE_CLASSES[id].name}</button>`).join('')}
+          ${classOrder.map((id) => `<button class="class-chip" data-class="${id}" type="button" aria-pressed="${id === selectedClass}">${icon(id === 'frost' ? 'snow' : 'flame', 15)} ${MAGE_CLASSES[id].name}</button>`).join('')}
         </div>
-        <h2><span id="character-title">${MAGE_CLASSES.frost.title}</span><br><em id="character-name">${MAGE_CLASSES.frost.character}</em></h2>
-        <p><span id="class-description">${MAGE_CLASSES.frost.description}</span><br>${STAGES.length}개 스테이지 · ${RUN_TIME / 60}분 동안 살아남으세요.</p>
+        <h2><span id="character-title">${initialMage.title}</span><br><em id="character-name">${initialMage.character}</em></h2>
+        <p><span id="class-description">${initialMage.description}</span><br>${STAGES.length}개 스테이지 · ${RUN_TIME / 60}분 동안 살아남으세요.</p>
         <div class="menu-actions">
           <button class="primary start" id="start" type="button" aria-keyshortcuts="Enter" disabled>
             ${icon('play', 19)} <span>모험 시작</span> <kbd>ENTER</kbd>
@@ -167,7 +171,7 @@ app.innerHTML = `
         <div class="loadout-name"><span class="slot-mark">${icon('snow', 17)}</span><h2 id="loadout-title">자동 주문</h2><span class="loadout-en">AUTO SPELLS</span></div>
         <div class="auto-status"><span class="heat-status" id="heat-status" role="status" hidden>${icon('flame', 14)}
           <span class="heat-pips" aria-hidden="true"><i></i><i></i></span><b id="heat-text">열기 0 / 2</b></span>
-          <span class="effect-status" id="effect-status" hidden></span><i></i> 습득한 주문 <b id="spell-count">1 / ${SPELLS.length}</b></div>
+          <span class="effect-status" id="effect-status" hidden></span><i></i> 습득한 주문 <b id="spell-count">1 / ${(selectedClass === 'fire' ? FIRE_SPELLS : SPELLS).length}</b></div>
       </div>
       <div class="slots" id="spell-slots"></div>
     </section>
@@ -266,7 +270,6 @@ try {
   if (record && Number.isFinite(record.time) && Number.isFinite(record.kills) && record.time >= 0 && record.time <= RUN_TIME && record.kills >= 0) best = record;
 } catch { /* Bad record is ignored. */ }
 let showNumbers = readSetting('numbers', 'on') === 'on';
-let selectedClass: MageClass = readSetting('class', 'frost') === 'fire' ? 'fire' : 'frost';
 const audio = new GameAudio(readSetting('sound', 'on') === 'on');
 
 let world: World | null = null;

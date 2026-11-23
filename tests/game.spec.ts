@@ -6,6 +6,13 @@ import type { World } from '../src/world/scene';
 
 const totalSpells = SPELLS.length;
 
+test.beforeEach(async ({ page }) => {
+  // Existing combat and render fixtures start as Frost unless a test picks Fire.
+  await page.addInitScript(() => {
+    if (!localStorage.getItem('frostfall.class')) localStorage.setItem('frostfall.class', 'frost');
+  });
+});
+
 async function beginRun(page: Page, byKeyboard = false) {
   const probe = await page.evaluateHandle(async () => {
     const { Combat } = await import(`${location.origin}/src/combat.ts`);
