@@ -271,6 +271,38 @@ test('left drag looks around, right drag steers, and the WoW-style camera follow
   await view.dispose();
 });
 
+test('holding right click and moving into level-up never opens the browser context menu', async ({ page }) => {
+  await page.goto('/');
+  const game = await beginRun(page);
+  const viewport = page.locator('#viewport');
+  const area = (await viewport.boundingBox())!;
+  const dialog = page.getByRole('dialog');
+  await page.mouse.move(area.x + area.width * .46, area.y + area.height * .50);
+  await page.mouse.down({ button: 'right' });
+  await page.keyboard.down('w');
+  try {
+    await expect(viewport).toHaveClass(/dragging/);
+    await expect.poll(() => game.evaluate((run) => run.player.moving)).toBe(true);
+    await game.evaluate((run) => { run.xp = run.goal; });
+    await expect(dialog).toHaveAccessibleName('레벨 업!');
+    await expect(viewport).not.toHaveClass(/dragging/);
+    const choice = dialog.locator('.upgrade-card').first();
+    await choice.hover();
+    expect(await choice.evaluate((card) => {
+      const event = new MouseEvent('contextmenu', { button: 2, bubbles: true, cancelable: true });
+      card.dispatchEvent(event);
+      return event.defaultPrevented;
+    })).toBe(true);
+  } finally {
+    await page.mouse.up({ button: 'right' });
+    await page.keyboard.up('w');
+  }
+  await page.keyboard.press('1');
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('#arena')).toHaveAttribute('data-state', 'playing');
+  await game.dispose();
+});
+
 test('A and D strafe relative to the character without rotating them', async ({ page }) => {
   await page.goto('/');
   const game = await beginRun(page);

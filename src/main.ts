@@ -987,7 +987,8 @@ viewport.addEventListener('pointermove', (event) => {
 for (const name of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) {
   viewport.addEventListener(name, (event) => endCameraDrag(event.pointerId));
 }
-viewport.addEventListener('contextmenu', (event) => { if (game?.status === 'playing') event.preventDefault(); });
+// Opening a dialog releases the viewport's pointer capture, so suppress the native menu on the whole game page.
+document.addEventListener('contextmenu', (event) => event.preventDefault(), { capture: true });
 viewport.addEventListener('wheel', (event) => {
   if (panel || game?.status !== 'playing' || event.ctrlKey) return;
   event.preventDefault();
