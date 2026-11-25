@@ -70,6 +70,33 @@ function material(name: string, vertexShader: string, fragmentShader: string, ti
   });
 }
 
+export function gustFront(hot: boolean) {
+  return material('advancing-gust', surfaceVertex, `
+    #include <common>
+    ${fog}
+    ${noise}
+    varying vec2 texel;
+    uniform vec3 tint, core;
+    uniform float strength, phase, variant;
+    void main() {
+      float side = texel.x, r = texel.y;
+      float edge = smoothstep(0.0, .10, side) * (1.0 - smoothstep(.90, 1.0, side));
+      edge *= smoothstep(.02, .12, r) * (1.0 - smoothstep(.91, 1.0, r));
+      float grain = noise2(vec2(side * 16.0, r * 7.0 - phase * 3.1));
+      float lead = mix(.14, 1.04, sin(min(1.0, phase * 1.7) * PI * .5));
+      float ragged = lead + (grain - .5) * .08;
+      float crest = exp(-abs(r - ragged) * 28.0);
+      float tail = exp(-abs(r - ragged + .19) * 9.0) * smoothstep(.36, .78, grain);
+      float filaments = pow(.5 + .5 * sin(side * 86.0 + r * 8.0 + grain * 5.8), 4.0);
+      float mist = exp(-abs(r - ragged + .14) * 6.0) * (.36 + .64 * grain);
+      vec3 shade = mix(tint * (variant > .5 ? .44 : .55), core, min(1.0, crest * .87 + tail * .46));
+      float energy = .80 * crest + .38 * tail * filaments + .32 * mist;
+      gl_FragColor = vec4(shade, min(1.0, energy) * edge * strength);
+      ${end}
+    }
+  `, hot ? '#ee552a' : '#418bc0', hot ? '#fff0a3' : '#e4ffff', hot ? 1 : 0, .91);
+}
+
 // A partial surface: draw only the etched filaments, pools, or filigree that belong to the spell.
 export function etchedSurface(pattern: Etching, tint: string, core: string, strength: number, vertical = false) {
   const shader = material(`etched-${pattern}`, surfaceVertex, `

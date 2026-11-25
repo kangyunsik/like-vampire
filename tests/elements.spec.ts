@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { Combat } from '../src/combat';
-import { ALL_SPELLS, CINDER_MARKS, CINDER_VORTEX, EMBER_BRAND, FIRE_BARRIER, FIRE_SPELLS, FLASHPOINT, GLOBAL_DAMAGE_PERCENT,
-  IGNITE_PERCENT, INFERNO_BURN_BOOST_PERCENT, RARITIES, SPELL_RARITY, SPELLS, STAGES, STAGE_TIME, WAVE_COUNT, WAVE_TIME, type MageClass } from '../src/data';
+import { ALL_SPELLS, CINDER_MARKS, CINDER_VORTEX, EMBER_BRAND, FIRE_BARRIER, FIRE_SPELLS, FLASHPOINT, FROZEN_ORB, GLOBAL_DAMAGE_PERCENT,
+  IGNITE_PERCENT, INFERNO_BURN_BOOST_PERCENT, RARITIES, SPELL_RARITY, SPELLS, STAGES, STAGE_TIME, UPGRADES, WAVE_COUNT, WAVE_TIME, type MageClass } from '../src/data';
 
 const still = { x: 0, z: 0 };
 const ignition = IGNITE_PERCENT / 100;
@@ -610,6 +610,47 @@ test('meteor windup, follow-along vortex, and Inferno Heart generate the expecte
   expect(vortex.enemies[1].ignite?.remaining).toBeCloseTo(CINDER_VORTEX.freshDamage * ignition);
 });
 
+test('Frozen Orb grows after dealing damage, reaches new targets on later pulses and resets each cast', () => {
+  const game = arena('frost', .5, [[0, 4], [2.05, 4]]);
+  game.spells.add('orb');
+  expect(game.cast('orb', null, still)).toBe(true);
+  const [orb] = game.orbs, [center, edge] = game.enemies;
+  Object.assign(orb, { x: 0, z: 4, vx: 0, vz: 0, age: 0, tick: 0 });
+  game.step(.02, still);
+  expect(center.hp).toBe(984);
+  expect(edge.hp).toBe(1000);
+  expect(orb.radius).toBeCloseTo(FROZEN_ORB.radius * 1.04);
+  game.step(.28, still);
+  expect(edge.hp).toBe(984);
+  expect(orb.radius).toBeCloseTo(FROZEN_ORB.radius * 1.12);
+  for (let i = 0; i < 7; i++) game.step(.28, still);
+  expect(orb.radius).toBeCloseTo(FROZEN_ORB.radius * 1.60);
+  game.cooldown.orb = 0;
+  expect(game.cast('orb', null, still)).toBe(true);
+  expect(game.orbs[1].radius).toBe(FROZEN_ORB.radius);
+});
+
+test('the Inferno Heart reward requires the learned spell and adds 10% of the base duration per rank', () => {
+  const game = arena('fire');
+  game.enemies[0].kind = 'warden';
+  const card = UPGRADES.find(({ id }) => id === 'inferno-heart-duration')!;
+  expect(game['canUpgrade'](card)).toBe(false);
+  game.spells.add('infernoHeart');
+  expect(game['canUpgrade'](card)).toBe(true);
+  for (const duration of [6.6, 7.2]) {
+    game.status = 'upgrade';
+    game.choices = [card];
+    expect(game.choose(card.id)).toBe(true);
+    game.cooldown.infernoHeart = 0;
+    expect(game.cast('infernoHeart', null, still)).toBe(true);
+    expect(game.inferno).toBeCloseTo(duration);
+  }
+  advance(game, 6.4);
+  expect(game.inferno).toBeCloseTo(.8);
+  advance(game, .82);
+  expect(game.inferno).toBe(0);
+});
+
 test('Crimson Supernova has a base wave and only adds part of a large stored ignite pool', () => {
   const game = arena('fire', .5, [[0, 4], [1, 4]]);
   const [first, second] = game.enemies;
@@ -634,7 +675,7 @@ test('late waves substantially increase spawn HP while movement speed grows by a
   expect(mob.speed / 2.18).toBeCloseTo(1.136);
   expect(opening.maxHp).toBe(27);
   expect(opening.speed).toBeCloseTo(1.95);
-  expect(late.enemies.find(({ kind }) => kind === 'leviathan')?.maxHp).toBe(28_800);
+  expect(late.enemies.find(({ kind }) => kind === 'leviathan')?.maxHp).toBe(14_400);
 });
 
 function bossRound(stage: number) {
@@ -653,12 +694,17 @@ test('the clockwork boss alternates a straight line of five circles with a cross
   expect(boss.hp).toBeGreaterThan(2150);
   expect(game.hazards).toHaveLength(5);
   expect(game.hazards.every((mark) => mark.cue === 'gearLine')).toBe(true);
-  expect(game.hazards.every((mark) => Math.abs(mark.x) < 1e-7)).toBe(true);
-  expect(game.hazards.map((mark) => mark.z)).toEqual([-6, -3, 0, 3, 6]);
+  const center = game.hazards[2], spacing = game.hazards[3].z - center.z;
+  expect(spacing).toBeGreaterThan(0);
+  for (const [index, mark] of game.hazards.entries()) {
+    expect(mark.x).toBeCloseTo(center.x);
+    expect(mark.z - center.z).toBeCloseTo((index - 2) * spacing);
+    expect(Math.hypot(mark.x, mark.z) + mark.radius).toBeLessThanOrEqual(game.moveSpeed * mark.windup + 1e-6);
+  }
   game.hazards = [];
   boss.attackAt = game.time;
   game.step(.02, still);
-  expect(game.hazards.some((mark) => Math.abs(mark.x) > 2)).toBe(true);
+  expect(game.hazards.some((mark) => Math.abs(mark.x - game.hazards[0].x) > 2)).toBe(true);
   expect(game.hazards.every((mark) => mark.cue === 'gearCross')).toBe(true);
 });
 
@@ -672,15 +718,20 @@ test('abyss warnings acquire the moving player later, then remain fixed before e
   expect(second.follow).toBeDefined();
   const oldCenter = [second.x, second.z];
   game.player.x = 7;
+  Object.assign(game.player, { slow: 2, slowPercent: 30 });
   advance(game, .46);
   expect(second.follow).toBeUndefined();
-  expect(second.x - oldCenter[0]).toBeCloseTo(7);
+  expect(second.x - oldCenter[0]).toBeGreaterThan(5);
+  expect(Math.hypot(second.x - game.player.x, second.z - game.player.z) + second.radius)
+    .toBeLessThanOrEqual(game.moveSpeed * second.windup + 1e-6);
   expect(third.follow).toBeDefined();
   const fixed = second.x;
   game.player.x = -7;
   advance(game, .51);
   expect(second.x).toBe(fixed);
   expect(third.follow).toBeUndefined();
+  expect(Math.hypot(third.x - game.player.x, third.z - game.player.z) + third.radius)
+    .toBeLessThanOrEqual(game.moveSpeed * third.windup + 1e-6);
   expect(first.delay).toBeLessThan(second.delay);
   expect(second.delay).toBeLessThan(third.delay);
   advance(game, second.delay + .02);

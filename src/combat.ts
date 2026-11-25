@@ -3,9 +3,9 @@ import {
   BOLT_SLOW_PERCENT, BOMB_MIN_SPREAD_POWER, BOMB_RADIUS_PERCENT, BOMB_SPREAD_BY_RANK, CHAIN_LIGHTNING,
   BOSS_HEALTH_MULTIPLIER, CAST_TIMES, CINDER_MARKS, CINDER_VORTEX, COMMON_TALENTS, COOLDOWNS,
   CRIT_CHANCE_PERCENT, CRIT_DAMAGE_PERCENT, EMBER_BRAND, FIELD_X, FIELD_Z, FIRE_BARRIER, FIRE_UNLOCKS, FLASHPOINT,
-  FROST_BIND, FROST_CHAIN, FROST_CRITICAL, FROZEN_DAMAGE_PERCENT, GLACIER_WALL, GLOBAL_DAMAGE_PERCENT,
-  HASTE_COOLDOWN_PERCENT,
-  IGNITE_PERCENT, IGNITE_TICKS, IGNITE_UPGRADE_PERCENT, INFERNO_BURN_BOOST_PERCENT, MAGE_CLASSES, MAX_STATUS_DURATION_BONUS,
+  FROST_BIND, FROST_CHAIN, FROST_CRITICAL, FROZEN_DAMAGE_PERCENT, FROZEN_ORB, GLACIER_WALL, GLOBAL_DAMAGE_PERCENT,
+  GUST_FORWARD_DOT, HASTE_COOLDOWN_PERCENT,
+  IGNITE_PERCENT, IGNITE_TICKS, IGNITE_UPGRADE_PERCENT, INFERNO_BURN_BOOST_PERCENT, INFERNO_HEART, MAGE_CLASSES, MAX_STATUS_DURATION_BONUS,
   MIN_REGEN_INTERVAL, PHOENIX, PILLAR_RADIUS_PERCENT, QUEST_BOSS, QUEST_BOSS_ATTACKS, RARITIES, RUN_TIME, RUN_XP_PERCENT,
   SLOW_MAX_PERCENT, SLOW_UPGRADE_PERCENT, SPELL_DAMAGE_PERCENT, SPELL_DAMAGE_PERK, SPELL_IGNITE_PERK, SPELL_LEARN_INTERVAL, SPELL_RARITY,
   SPELL_UNLOCKS, STAFF_RELEASE_PHASE, STAGES, STAGE_TIME, UPGRADES, WAVE_COUNT, WAVE_MOB_LIMIT, WAVE_TIME, isBoss, rangedElite,
@@ -68,7 +68,9 @@ type Flight = Point & Aimed & { vx: number; vz: number; life: number; age?: numb
 export type Shot = Flight & { kind: keyof typeof SHOT_SPEED; charged: boolean; hits: Set<number> };
 export type Pickup = Point & { age: number; value: number; phase: number; tier: PickupTier; pull?: number };
 export type Storm = Point & Aimed & { radius: number; life: number; maxLife: number; tick: number; fire?: boolean; pulses?: number; mobile?: boolean };
-type Orb = Flight & { radius: number; tick: number };
+type Orb = Flight & { radius: number; baseRadius: number; tick: number };
+type Lightning = { from: Point; front: CastFront; radius: number; delay: number; hit: Set<number>;
+  limit: number; damage: number; decay: number; amplify: number; charged: boolean };
 type Comet = Point & Aimed & { target: Enemy; radius: number; delay: number; windup: number };
 type GroundImpact = Point & Aimed & { radius: number; delay: number; windup: number; spell: 'iceBloom' | 'meteor' };
 type GlacierWall = Aimed & { from: Point; to: Point; width: number; life: number; maxLife: number; hits: Set<number> };
@@ -78,7 +80,9 @@ export type Hazard = Point & {
   slow?: SlowDebuff; charge?: { enemy: Enemy; to: Point; travel: number };
 };
 export type CombatEvent =
-  | { kind: 'cast'; spell: Spell; x: number; z: number; radius?: number; to?: Point; path?: Point[]; heading?: number; consumedChill?: number; bombPower?: number }
+  | { kind: 'cast'; spell: Spell; x: number; z: number; radius?: number; to?: Point; path?: Point[]; heading?: number; bombPower?: number }
+  | ({ kind: 'chain-lightning-hit'; from: Point; hop: number; charged: boolean; consumedChill: boolean } & Point)
+  | ({ kind: 'lightning-charge' } & Point)
   | { kind: 'strike'; x: number; z: number; damage: number; frozen: boolean; fire?: true; critical?: true; dot?: true; spell?: DamageSpell }
   | { kind: 'spell-impact'; spell: Spell; x: number; z: number; radius: number; heading?: number }
   | { kind: 'ignite-burst'; spell: 'flashpoint' | 'livingBomb' | 'supernova'; x: number; z: number; radius: number; bombPower?: number }
@@ -101,7 +105,14 @@ export type CombatEvent =
   | { kind: 'level' };
 
 const cap = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+function randomStream(seed: number) {
+  return () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+}
 const dist = (a: Point, b: Point) => (a.x - b.x) ** 2 + (a.z - b.z) ** 2;
+const chilled = (enemy: Enemy) => enemy.slow > 0 || enemy.frozen > 0;
 const forwardDepth = (front: CastFront, point: Point) => (point.x - front.x) * front.dx + (point.z - front.z) * front.dz;
 const inFront = (point: Point, front?: CastFront) => !front || forwardDepth(front, point) >= -1e-7;
 const angleFrom = (from: Point, to: Point) => Math.atan2(to.x - from.x, to.z - from.z);
@@ -189,10 +200,12 @@ export class Combat {
   heat = 0;
   combustion = 0;
   inferno = 0;
+  lightningCharge = false;
   cooldown = Object.fromEntries(Object.keys(COOLDOWNS).map((spell) => [spell, 0])) as Record<Spell, number>;
   limits = { ...COOLDOWNS };
   player = { x: 0, z: 0, heading: Math.PI, angle: Math.PI, moveAngle: Math.PI, moving: false, casting: 0, castSide: 0,
     pose: 'bolt' as Spell, immunity: 0, hurt: 0, slow: 0, slowPercent: 0 };
+  readonly movement: Point = { x: 0, z: 0 };
   enemies: Enemy[] = [];
   shots: Shot[] = [];
   pickups: Pickup[] = [];
@@ -202,6 +215,7 @@ export class Combat {
   readonly buffs: Record<QuestBuff, number> = { power: 0, swift: 0, vital: 0 };
   storms: Storm[] = [];
   orbs: Orb[] = [];
+  private lightning: Lightning[] = [];
   comets: Comet[] = [];
   impacts: GroundImpact[] = [];
   walls: GlacierWall[] = [];
@@ -232,6 +246,7 @@ export class Combat {
   private obstacleColumn = Infinity;
   private obstacleRow = Infinity;
   private readonly expeditionRng: () => number;
+  private readonly attackRng: () => number;
   private nextSupply: Record<SupplyKind, number> = { heart: SUPPLIES.heart.first, magnet: SUPPLIES.magnet.first };
   private readonly permanent;
 
@@ -249,11 +264,10 @@ export class Combat {
     this.spells = new Set([MAGE_CLASSES[mageClass].starter]);
     if (visibleSpawn) this.opening = 4;
     else for (const [x, z] of [[-5.2, -3], [5.6, -2.1], [-1.4, 7.4], [2.8, -7.8]]) this.spawnAt('puff', x, z);
-    let seed = Math.floor(this.rng() * 0x100000000) >>> 0;
-    this.expeditionRng = () => {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      return seed / 0x100000000;
-    };
+    const seed = Math.floor(this.rng() * 0x100000000) >>> 0;
+    this.expeditionRng = randomStream(seed);
+    // Warning placement shouldn't change the random stream for crits, loot or spawns.
+    this.attackRng = randomStream(seed ^ 0x9e3779b9);
     this.expedition = expeditionSites(this.expeditionRng, terrainObstacles);
   }
 
@@ -370,8 +384,8 @@ export class Combat {
     const length = Math.hypot(input.x, input.z);
     p.moving = length > .01;
     p.angle = p.heading;
+    const prevX = p.x, prevZ = p.z;
     if (p.moving) {
-      const prevX = p.x, prevZ = p.z;
       const dx = input.x / length, dz = input.z / length;
       const speed = this.moveSpeed;
       p.moveAngle = Math.atan2(dx, dz);
@@ -379,8 +393,11 @@ export class Combat {
       p.z += dz * speed * dt;
       this.alignObstacles();
       this.resolveObstacles(p, .34);
-      this.trackTravel(p.x - prevX, p.z - prevZ, dt);
-    } else this.trackTravel(0, 0, dt);
+    }
+    const movedX = p.x - prevX, movedZ = p.z - prevZ;
+    this.movement.x = dt > 0 ? movedX / dt : 0;
+    this.movement.z = dt > 0 ? movedZ / dt : 0;
+    this.trackTravel(movedX, movedZ, dt);
     this.alignEntities();
 
     const boss = this.pendingBosses[0];
@@ -399,6 +416,7 @@ export class Combat {
     this.spawnQuestEnemies();
     this.redistributeTrail();
 
+    this.updateLightning(dt);
     this.autoSpells(input);
     this.updateEnemies(dt);
     if (this.status !== 'playing') return;
@@ -469,6 +487,10 @@ export class Combat {
     for (const npc of this.questNpcs) align(npc);
     for (const supply of this.supplies) align(supply);
     for (const point of this.quest?.signals ?? []) align(point);
+    for (const arc of this.lightning) {
+      align(arc.front);
+      align(arc.from);
+    }
     for (const hazard of this.hazards) {
       const beforeX = hazard.x, beforeZ = hazard.z;
       align(hazard);
@@ -741,36 +763,40 @@ export class Combat {
       const attack: Attack | undefined = ranged?.attack ?? (turn === 1 ? patterns?.alternate : undefined) ?? patterns?.attack;
       if (!attack) continue;
       const angle = Math.atan2(z - enemy.z, x - enemy.x);
-      const lead = ranged && this.player.moving ? Math.min(1.65, this.moveSpeed * .28) : 0;
-      const targetX = x + Math.sin(this.player.moveAngle) * lead, targetZ = z + Math.cos(this.player.moveAngle) * lead;
-      const mark = (px: number, pz: number, delay = 0, follow?: Point) => {
+      const reach = this.attackReach(attack.windup, attack.radius);
+      const footprint = Math.max(0, ...attack.offsets.map(Math.abs));
+      const spacing = footprint ? Math.min(1, reach * .82 / footprint) : 1;
+      const aim = this.enemyAim(Math.max(0, reach - footprint * spacing));
+      const mark = (dx: number, dz: number, delay: number) => {
+        const offset = { x: aim.x + dx, z: aim.z + dz };
         const hazard: Hazard = {
-          x: px, z: pz,
+          x, z,
           radius: attack.radius, delay: attack.windup + delay, windup: attack.windup, damage: attack.damage, cue: attack.cue,
           ...(ranged ? { elite: true } as const : {}),
-          ...(follow ? { follow } : {}),
+          ...(delay ? { follow: offset } : {}),
           ...(attack.slow ? { slow: attack.slow } : {}),
         };
+        this.placeGroundWarning(hazard, offset);
         this.hazards.push(hazard);
         if (ranged) eliteZones++;
         if (!delay) this.hazardEvent('enemy-warning', hazard);
       };
-      for (const [i, offset] of attack.offsets.entries()) {
+      for (const [i, distance] of attack.offsets.entries()) {
+        const offset = distance * spacing;
         const delay = (attack.cadence ?? 0) * i;
         if (attack.pattern === 'line') {
-          mark(targetX + Math.cos(angle) * offset, targetZ + Math.sin(angle) * offset, delay);
+          mark(Math.cos(angle) * offset, Math.sin(angle) * offset, delay);
         } else if (attack.pattern === 'chase') {
           const a = angle + i * 2.39996;
-          const offsetFromPlayer = { x: Math.cos(a) * offset, z: Math.sin(a) * offset };
-          mark(targetX + offsetFromPlayer.x, targetZ + offsetFromPlayer.z, delay, delay ? offsetFromPlayer : undefined);
+          mark(Math.cos(a) * offset, Math.sin(a) * offset, delay);
         } else if (attack.pattern === 'ring' && offset) {
           for (let i = 0; i < 6; i++) {
             const a = angle + i * Math.PI / 3;
-            mark(targetX + Math.cos(a) * offset, targetZ + Math.sin(a) * offset, delay);
+            mark(Math.cos(a) * offset, Math.sin(a) * offset, delay);
           }
         } else {
-          mark(targetX - Math.sin(angle) * offset, targetZ + Math.cos(angle) * offset, delay);
-          if (offset && attack.pattern === 'cross') mark(targetX + Math.cos(angle) * offset, targetZ + Math.sin(angle) * offset, delay);
+          mark(-Math.sin(angle) * offset, Math.cos(angle) * offset, delay);
+          if (offset && attack.pattern === 'cross') mark(Math.cos(angle) * offset, Math.sin(angle) * offset, delay);
         }
       }
       enemy.attackPattern = cycle + 1;
@@ -779,11 +805,37 @@ export class Combat {
     }
   }
 
+  private attackReach(windup: number, radius: number) {
+    // Keep the outer edge in the movement budget when the warning is wide enough to permit it.
+    return Math.max(0, this.moveSpeed * windup - radius);
+  }
+
+  private enemyAim(reach: number) {
+    const bearing = this.attackRng();
+    const direction = this.player.moving ? this.player.moveAngle + (bearing - .5) * Math.PI * 1.42 : bearing * 2 * Math.PI;
+    const offset = reach * (.26 + .40 * this.attackRng());
+    return { x: Math.sin(direction) * offset, z: Math.cos(direction) * offset };
+  }
+
+  private placeGroundWarning(hazard: Hazard, offset: Point) {
+    const reach = this.attackReach(cap(hazard.delay, 0, hazard.windup), hazard.radius);
+    const length = Math.hypot(offset.x, offset.z), scale = length > reach ? reach / length : 1;
+    hazard.x = this.player.x + offset.x * scale;
+    hazard.z = this.player.z + offset.z * scale;
+  }
+
   private planCharge(enemy: Enemy, attack: ChargeAttack, tempo: number) {
-    const gap = Math.sqrt(dist(enemy, this.player));
+    const p = this.player, gap = Math.sqrt(dist(enemy, p));
     if (gap < .01 || gap > attack.distance) return false;
-    const dx = (this.player.x - enemy.x) / gap, dz = (this.player.z - enemy.z) / gap;
-    const length = Math.min(attack.distance, gap + 2.5), margin = enemy.radius * .71;
+    const reach = this.attackReach(attack.windup, attack.radius);
+    const jitter = this.enemyAim(Math.min(3, reach));
+    const overshoot = Math.min(2.5, reach * .56);
+    const aimX = (p.x - enemy.x) / gap * overshoot + jitter.x, aimZ = (p.z - enemy.z) / gap * overshoot + jitter.z;
+    const distance = Math.hypot(aimX, aimZ), scale = distance > reach ? reach / distance : 1;
+    const x = p.x + aimX * scale - enemy.x, z = p.z + aimZ * scale - enemy.z, aimed = Math.hypot(x, z);
+    if (aimed < .01) return false;
+    const dx = x / aimed, dz = z / aimed;
+    const length = Math.min(attack.distance, aimed), margin = enemy.radius * .71;
     const steps = Math.ceil(length / .30);
     let clear = 0;
     for (let i = 1; i <= steps; i++) {
@@ -794,6 +846,7 @@ export class Combat {
     }
     if (clear < 2.7) return false;
     const to = { x: enemy.x + dx * clear, z: enemy.z + dz * clear };
+    if (dist(p, to) > reach * reach + 1e-7) return false;
     const hazard: Hazard = { x: enemy.x, z: enemy.z, radius: attack.radius, damage: attack.damage, cue: attack.cue,
       delay: attack.windup, windup: attack.windup, charge: { enemy, to, travel: attack.travel } };
     enemy.bracing = true;
@@ -822,8 +875,7 @@ export class Combat {
       const waiting = hazard.delay > hazard.windup;
       hazard.delay -= dt;
       if (hazard.follow && hazard.delay <= hazard.windup) {
-        hazard.x = this.player.x + hazard.follow.x;
-        hazard.z = this.player.z + hazard.follow.z;
+        this.placeGroundWarning(hazard, hazard.follow);
         delete hazard.follow;
       }
       if (waiting && hazard.delay <= hazard.windup) this.hazardEvent('enemy-warning', hazard);
@@ -1323,8 +1375,9 @@ export class Combat {
     } else if (spell === 'orb' && target) {
       const angle = Math.atan2(target.x - x, target.z - z);
       const dx = Math.sin(angle), dz = Math.cos(angle);
+      const radius = this.area(FROZEN_ORB.radius, this.perk('vortex') * 15);
       this.orbs.push({ x: x + dx * .6, z: z + dz * .6, vx: dx * 7.4, vz: dz * 7.4,
-        radius: this.area(1.85, this.perk('vortex') * 15), life: 2.35, tick: .04, front,
+        radius, baseRadius: radius, life: 2.35, tick: .04, front,
         age: -CAST_TIMES.orb * STAFF_RELEASE_PHASE });
       this.events.push({ kind: 'cast', spell, x, z });
     } else if (spell === 'comet' && target) {
@@ -1388,7 +1441,6 @@ export class Combat {
     const sizeBonus = spell === 'glacierWall' ? this.perk('glacier-wall-size') * GLACIER_WALL.sizeStep : 0;
     const radius = this.area(base, sizeBonus);
     const targets = this.nearby(ADVANCED_RANGE[spell] || radius, front);
-    const chilled = (e: Enemy) => e.slow > 0 || e.frozen > 0;
     const remaining = (e: Enemy) => e.ignite?.remaining ?? 0;
     const canBrand = (e: Enemy) => remaining(e) > 0 && !e.ignite?.interval;
     let target: Enemy | undefined = targets[0];
@@ -1428,18 +1480,24 @@ export class Combat {
     this.startPose(spell, target);
     const to = { x: target.x, z: target.z };
     let path: Point[] | undefined;
-    let consumedChill = 0;
     switch (spell) {
-      case 'frostChain':
       case 'chainLightning': {
-        const bolt = spell === 'chainLightning';
-        const limit = bolt ? 1 + CHAIN_LIGHTNING.bounces + CHAIN_LIGHTNING.extra * this.perk('chain-lightning-links')
-          : FROST_CHAIN.targets + FROST_CHAIN.extra * this.perk('frost-chain-links');
-        const loss = bolt ? Math.max(0, CHAIN_LIGHTNING.loss - CHAIN_LIGHTNING.mitigation * this.perk('chain-lightning-loss')) : FROST_CHAIN.loss;
-        const decay = 1 - loss / 100;
-        const amplify = CHAIN_LIGHTNING.amplify + CHAIN_LIGHTNING.amplifyStep * this.perk('chain-lightning-amplify');
-        const candidates = this.enemies.filter((enemy) => enemy.hp > 0 && inFront(enemy, front));
-        const jumpRange = radius ** 2;
+        const charged = this.lightningCharge;
+        this.lightningCharge = false;
+        const arc: Lightning = {
+          from: center, front, radius, delay: CHAIN_LIGHTNING.hopDelay, hit: new Set(), charged,
+          limit: 1 + CHAIN_LIGHTNING.bounces + CHAIN_LIGHTNING.extra * this.perk('chain-lightning-links'),
+          damage: CHAIN_LIGHTNING.damage * (charged ? 1 + CHAIN_LIGHTNING.chargePercent / 100 : 1),
+          decay: 1 - Math.max(0, CHAIN_LIGHTNING.loss - CHAIN_LIGHTNING.mitigation * this.perk('chain-lightning-loss')) / 100,
+          amplify: CHAIN_LIGHTNING.amplify + CHAIN_LIGHTNING.amplifyStep * this.perk('chain-lightning-amplify'),
+        };
+        this.events.push({ kind: 'cast', spell, x, z, to, radius });
+        this.hitLightning(arc, target);
+        this.lightning.push(arc);
+        return true;
+      }
+      case 'frostChain': {
+        const limit = FROST_CHAIN.targets + FROST_CHAIN.extra * this.perk('frost-chain-links');
         path = [center];
         const hit = new Set<number>();
         let next: Enemy | undefined = target;
@@ -1447,33 +1505,9 @@ export class Combat {
           const current: Enemy = next;
           hit.add(current.id);
           path.push({ x: current.x, z: current.z });
-          if (bolt) {
-            const boosted = chilled(current);
-            this.damage(current, spell, CHAIN_LIGHTNING.damage * decay ** i * (boosted ? amplify : 1));
-            if (boosted) {
-              consumedChill++;
-              current.slow = current.frozen = 0;
-              delete current.slowPower;
-              delete current.chills;
-              delete current.freezeSource;
-            }
-          } else {
-            this.chill(current, spell, 2.4, .54);
-            this.damage(current, spell, FROST_CHAIN.damage * decay ** i);
-          }
-          if (i + 1 === limit) break;
-          next = undefined;
-          let best = Infinity;
-          for (const enemy of candidates) {
-            if (enemy.hp <= 0 || hit.has(enemy.id)) continue;
-            const distance = dist(enemy, current);
-            if (distance > jumpRange) continue;
-            // Favor a similarly close chilled target without making the jump reach farther.
-            const score = distance * (bolt && chilled(enemy) ? .75 : 1);
-            if (score >= best) continue;
-            next = enemy;
-            best = score;
-          }
+          this.chill(current, spell, 2.4, .54);
+          this.damage(current, spell, FROST_CHAIN.damage * (1 - FROST_CHAIN.loss / 100) ** i);
+          if (i + 1 < limit) next = this.nextChainTarget(current, front, radius, hit);
         }
         break;
       }
@@ -1573,7 +1607,7 @@ export class Combat {
         const dx = Math.sin(angle), dz = Math.cos(angle);
         for (const e of targets) {
           const length = Math.hypot(e.x - x, e.z - z);
-          if (length >= .2 && (e.x - x) * dx + (e.z - z) * dz < length * .53) continue;
+          if (length >= .2 && (e.x - x) * dx + (e.z - z) * dz < length * GUST_FORWARD_DOT) continue;
           if (spell === 'frostGale') this.chill(e, spell, 2, .52);
           this.damage(e, spell, spell === 'frostGale' ? 42 : 41);
         }
@@ -1613,14 +1647,57 @@ export class Combat {
         this.storms.push({ ...center, radius, life: CINDER_VORTEX.duration, maxLife: CINDER_VORTEX.duration, tick: .08, fire: true, mobile: true, front });
         break;
       case 'infernoHeart':
-        this.inferno = 6;
+        this.inferno = INFERNO_HEART.duration * (1 + this.perk('inferno-heart-duration') * INFERNO_HEART.durationStep / 100);
         for (const e of targets) this.damage(e, spell, INFERNO_IMPACT);
         this.events.push({ kind: 'spell-impact', spell, ...center, radius, heading });
         break;
     }
     this.events.push({ kind: 'cast', spell, x, z, to, radius, ...(spell === 'emberFan' || spell === 'frostGale' ? { heading } : {}),
-      ...(path ? { path } : {}), ...(spell === 'chainLightning' ? { consumedChill } : {}) });
+      ...(path ? { path } : {}) });
     return true;
+  }
+
+  private nextChainTarget(from: Point, front: CastFront, radius: number, hit: Set<number>, preferChilled = false) {
+    let next: Enemy | undefined, best = Infinity;
+    const reach = radius * radius;
+    for (const enemy of this.enemies) {
+      if (enemy.hp <= 0 || hit.has(enemy.id) || !inFront(enemy, front)) continue;
+      const distance = dist(enemy, from);
+      if (distance > reach) continue;
+      const score = distance * (preferChilled && chilled(enemy) ? .75 : 1);
+      if (score >= best) continue;
+      next = enemy;
+      best = score;
+    }
+    return next;
+  }
+
+  private hitLightning(arc: Lightning, enemy: Enemy) {
+    const hop = arc.hit.size, consumedChill = chilled(enemy), { x, z } = enemy;
+    arc.hit.add(enemy.id);
+    this.events.push({ kind: 'chain-lightning-hit', from: { ...arc.from }, x, z, hop, charged: arc.charged, consumedChill });
+    this.damage(enemy, 'chainLightning', arc.damage * arc.decay ** hop * (consumedChill ? arc.amplify : 1));
+    if (consumedChill) {
+      enemy.slow = enemy.frozen = 0;
+      delete enemy.slowPower;
+      delete enemy.chills;
+      delete enemy.freezeSource;
+    }
+    arc.from = { x, z };
+  }
+
+  private updateLightning(dt: number) {
+    for (let i = this.lightning.length - 1; i >= 0; i--) {
+      const arc = this.lightning[i];
+      arc.delay -= dt;
+      while (arc.delay <= 1e-8 && arc.hit.size < arc.limit) {
+        const next = this.nextChainTarget(arc.from, arc.front, arc.radius, arc.hit, true);
+        if (!next) { this.lightning.splice(i, 1); break; }
+        this.hitLightning(arc, next);
+        arc.delay += CHAIN_LIGHTNING.hopDelay;
+      }
+      if (arc.hit.size >= arc.limit) this.lightning.splice(i, 1);
+    }
   }
 
   private flightStep(projectile: Flight, dt: number) {
@@ -1755,11 +1832,19 @@ export class Combat {
       orb.tick -= travel;
       if (orb.tick > 0) continue;
       orb.tick += .28;
+      let hits = 0;
       for (const enemy of this.enemies) {
         if (enemy.hp <= 0 || dist(enemy, orb) > (orb.radius + enemy.radius * .3) ** 2 || !inFront(enemy, orb.front)) continue;
+        const hp = enemy.hp;
         this.chill(enemy, 'orb', .82, .47);
         this.damage(enemy, 'orb', 16);
+        if (enemy.hp < hp) hits++;
       }
+      // All enemies in one pulse use the same radius; growth applies to the next pulse.
+      if (hits) orb.radius = Math.min(
+        orb.baseRadius * (1 + FROZEN_ORB.maxGrowth / 100),
+        orb.radius + orb.baseRadius * hits * FROZEN_ORB.hitGrowth / 100,
+      );
     }
   }
 
@@ -1859,7 +1944,11 @@ export class Combat {
     if (enemy.hp <= 0 || scale <= 0) return;
     critical ??= this.rollCrit(spell);
     const damage = this.scaledDamage(enemy, spell, value, critical) * scale;
-    this.strike(enemy, damage, { spell, frozen, critical });
+    const dealt = this.strike(enemy, damage, { spell, frozen, critical });
+    if (dealt > 0 && critical && spell !== 'chainLightning' && !this.lightningCharge && this.spells.has('chainLightning')) {
+      this.lightningCharge = true;
+      this.events.push({ kind: 'lightning-charge', x: this.player.x, z: this.player.z });
+    }
     if (enemy.hp <= 0) return;
     if (this.mageClass === 'frost') {
       if (critical && spell !== 'chainLightning') this.frostCritical(enemy);

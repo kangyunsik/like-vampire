@@ -4,7 +4,7 @@ import './style.css';
 import { GameAudio } from './audio';
 import { Combat, type CombatEvent, type Point } from './combat';
 import {
-  ALL_SPELLS, BASE_REGEN_INTERVAL, FIELD_X, FIELD_Z, FIRE_SPELLS, MAGE_CLASSES, PICKUP_STYLES, QUEST_BOSS_NAME,
+  ALL_SPELLS, BASE_REGEN_INTERVAL, CHAIN_LIGHTNING, FIELD_X, FIELD_Z, FIRE_SPELLS, MAGE_CLASSES, PICKUP_STYLES, QUEST_BOSS_NAME,
   RARITIES, RUN_TIME, SPELL_LEARN_INTERVAL, SPELL_RARITY, SPELLS,
   STAGES, STAGE_TIME, WAVE_COUNT, clock, type MageClass, type PerkId, type Rarity, type Spell, type UpgradeId,
 } from './data';
@@ -533,9 +533,10 @@ function updateHud() {
     }
     const text = game.mageClass === 'fire'
       ? `${game.inferno ? `용광 ${Math.ceil(game.inferno)}초 · ` : ''}작열 ${burning}명`
-      : `둔화 ${chilled} · 빙결 ${frozen}`;
+      : `${game.lightningCharge ? `전하 충전 +${CHAIN_LIGHTNING.chargePercent}% · ` : ''}둔화 ${chilled} · 빙결 ${frozen}`;
     if (effectStatus.textContent !== text) effectStatus.textContent = text;
     effectStatus.dataset.element = game.mageClass;
+    effectStatus.dataset.charged = String(game.lightningCharge);
   }
   const p = game?.player;
   fieldCompass.hidden = !p;
@@ -668,10 +669,12 @@ function permanentContent() {
         <div><h3>${name}</h3><span class="permanent-rank">${rank} / ${PERMANENT_MAX_RANK}단계</span></div>
       </div>
       <p>${detail}</p>
-      <div class="permanent-stats"><span>현재 <b>${bonus(rank)}</b></span>${maxed ? '' : `<span>다음 <b>${bonus(rank + 1)}</b></span>`}</div>
-      <button class="secondary permanent-buy" type="button" data-permanent="${id}" aria-label="${name} 강화${maxed ? ' 완료' : ` · ${pointsLabel(cost)}`}" ${disabled ? 'disabled' : ''}>
-        <span>${maxed ? '최대 단계' : disabled ? '포인트 부족' : '강화하기'}</span>${maxed ? '' : `<b>${pointsLabel(cost)}</b>`}
-      </button>
+      <div class="permanent-card-footer">
+        <div class="permanent-stats"><span>현재 <b>${bonus(rank)}</b></span>${maxed ? '' : `<span>다음 <b>${bonus(rank + 1)}</b></span>`}</div>
+        <button class="secondary permanent-buy" type="button" data-permanent="${id}" aria-label="${name} 강화${maxed ? ' 완료' : ` · ${pointsLabel(cost)}`}" ${disabled ? 'disabled' : ''}>
+          <span>${maxed ? '최대 단계' : disabled ? '포인트 부족' : '강화하기'}</span>${maxed ? '' : `<b>${pointsLabel(cost)}</b>`}
+        </button>
+      </div>
     </article>`;
   }).join('')}</div>`;
 }
@@ -742,7 +745,7 @@ function openPanel(next: Panel, focusSpell?: string) {
       <div><span>둘러보기 / 캐릭터 방향 전환</span><span>왼쪽 / 오른쪽 버튼 드래그</span></div>
       <div><span>카메라 확대·축소</span><span>마우스 휠</span></div>
       <div><span>전술 시점 전환 · 뒤로 시점 맞추기</span><span>${control('V', 'C')}</span></div>
-      <div><span>NPC와 대화 · 공용 특성 · 전장 지도</span><span>${control('F', 'G', 'M')}</span></div>
+      <div><span>NPC 대화·의뢰 수락 / 공용 특성 / 전장 지도</span><span>${control('F', 'G', 'M')}</span></div>
       <div><span>실시간 피해 집계 열기·닫기</span><span>${control('T')}</span></div>
       <div><span>습득한 주문 · 위험할 때 점멸</span><span class="guide-auto">자동 시전</span></div>
       <div><span>레벨업 주문 / 강화 선택</span><span>${control('1', '2', '3')}</span></div>
@@ -787,7 +790,7 @@ function openPanel(next: Panel, focusSpell?: string) {
       <span>${icon('spark', 17)} 무작위 ${QUEST_BUFF_SECONDS / 60}분 버프</span></div>
       <small>${QUEST_BUFF_IDS.map((kind) => QUEST_BUFFS[kind].label).join(' · ')} 중 하나</small></div>
       <div class="dialog-buttons">${button('나중에', 'close', false)}
-      <button type="button" class="primary" data-npc="${npc.id}">${icon('quest', 17)} 의뢰 수락</button></div>`;
+      <button type="button" class="primary" data-npc="${npc.id}" aria-keyshortcuts="F">${icon('quest', 17)} 의뢰 수락 <kbd aria-hidden="true">F</kbd></button></div>`;
   } else if (next === 'quest-reward' && questReward) {
     const reward = questReward, buff = QUEST_BUFFS[reward.buff];
     title = '퀘스트 완료';
@@ -918,7 +921,7 @@ function finishRun() {
 
 function runEvent(event: CombatEvent) {
   world?.addEvent(event);
-  audio.combat(event);
+  audio.combat(event, game ? { x: game.player.x, z: game.player.z, heading: world?.cameraHeading } : undefined);
   if (event.kind === 'stage') {
     audio.play('start');
     const stage = STAGES[event.index];
@@ -1055,7 +1058,7 @@ dialog.addEventListener('click', (event) => {
     if (next) {
       saveProgression(next);
       openPanel('permanent');
-      dialogContent.querySelector<HTMLButtonElement>(`[data-permanent="${permanent}"]:enabled`)?.focus();
+      dialogContent.querySelector<HTMLButtonElement>(`[data-permanent="${permanent}"]:enabled`)?.focus({ preventScroll: true });
     }
     return;
   }
@@ -1099,6 +1102,11 @@ window.addEventListener('keydown', (event) => {
   if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
   const code = event.code;
   if (panel) {
+    if (code === 'KeyF' && panel === 'quest') {
+      event.preventDefault();
+      if (!event.repeat) dialogContent.querySelector<HTMLButtonElement>('[data-npc]')?.click();
+      return;
+    }
     if (code === 'Escape' || (code === 'KeyM' && panel === 'map')) {
       event.preventDefault();
       if (!event.repeat && panel !== 'upgrade' && panel !== 'result') closePanel();
@@ -1179,7 +1187,8 @@ function loop(now: number) {
     game.events.length = 0;
   }
   if (game) updateHud();
-  world?.draw(game, animationTime, dt, Boolean(panel) || (!game && reducedMotion.matches));
+  const footfall = world?.draw(game, animationTime, dt, Boolean(panel) || (!game && reducedMotion.matches));
+  if (footfall) audio.footstep(footfall);
   requestAnimationFrame(loop);
 }
 

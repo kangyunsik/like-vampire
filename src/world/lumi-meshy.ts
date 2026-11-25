@@ -4,6 +4,7 @@ import { clone } from 'three/addons/utils/SkeletonUtils.js';
 import { CAST_TIMES, type MageClass, type Spell } from '../data';
 import { makeMageStaff } from './actors';
 import { makeLumiCast } from './lumi-cast';
+import { makeMageStride } from './mage-stride';
 
 const MODEL_SCALE = 1.84;
 const MODELS = {
@@ -21,7 +22,7 @@ function loadMage(mageClass: MageClass) {
 }
 
 export type MageFrame = {
-  time: number; dt: number; moving: boolean; forward: number; casting: number; castSide?: number; pose?: Spell; hurt?: boolean; menu?: boolean;
+  time: number; dt: number; side: number; forward: number; casting: number; castSide?: number; pose?: Spell; hurt?: boolean; menu?: boolean;
 };
 
 function makeRig(asset: GLTF, mageClass: MageClass, actor: T.Group) {
@@ -49,31 +50,31 @@ function makeRig(asset: GLTF, mageClass: MageClass, actor: T.Group) {
     if (!clip) throw new Error(`${appearance.name} is missing its ${name} motion`);
     return clip;
   });
-  const weights = [1, 0, 0];
-  const actions = clips.map((clip, i) => mixer.clipAction(clip).setEffectiveWeight(weights[i]).play());
+  const actions = clips.map((clip, i) => mixer.clipAction(clip).setEffectiveWeight(i === 0 ? 1 : 0).play());
+  mixer.update(0);
+  const stride = makeMageStride(root, bone);
   const staff = makeMageStaff(fire);
   const swing = makeLumiCast(actor, bone, staff.root, .64, fire
     ? { grip: [.7, 12, -2], spellcast: T.AnimationClip.findByName(asset.animations, 'Spellcast') ?? undefined }
     : {});
 
-  const animate = ({ time, dt, moving, forward, casting, castSide = 0, pose = 'bolt', hurt, menu }: MageFrame) => {
-    const gait = !moving ? 0 : forward > .62 ? 2 : 1;
-    const blend = 1 - Math.exp(-dt * 15);
+  const animate = ({ time, dt, side, forward, casting, castSide = 0, pose = 'bolt', hurt, menu }: MageFrame) => {
+    const landed = stride.advance(dt, side, forward);
+    const run = T.MathUtils.smoothstep(stride.forward, .24, .87);
+    stride.restore();
     swing.restore();
-    for (let i = 0; i < actions.length; i++) {
-      weights[i] = T.MathUtils.lerp(weights[i], Number(i === gait), blend);
-      actions[i].setEffectiveWeight(weights[i]);
-    }
-    actions[1].setEffectiveTimeScale(forward < -.5 ? -.95 : 1.17);
-    actions[2].setEffectiveTimeScale(1.03);
+    actions[0].setEffectiveWeight(1 - stride.weight);
+    actions[1].setEffectiveWeight(stride.weight * (1 - run)).setEffectiveTimeScale(stride.forward < -.3 ? -.92 : 1.08);
+    actions[2].setEffectiveWeight(stride.weight * run).setEffectiveTimeScale(1.03);
     mixer.update(dt);
     swing.capture();
 
     const phase = 1 - T.MathUtils.clamp(casting / CAST_TIMES[pose], 0, 1);
     const pulse = casting > 0 ? Math.sin(phase * Math.PI) : 0;
     root.position.y = pose === 'blink' ? pulse * .22 : 0;
-    root.rotation.z = hurt ? -.038 : 0;
-    staff.animate(time, swing.apply(time, casting, pose, castSide, weights[2], Boolean(menu && !fire)));
+    stride.apply();
+    staff.animate(time, swing.apply(time, casting, pose, castSide, stride, Boolean(menu && !fire), hurt));
+    return landed;
   };
   return { root, animate };
 }
@@ -97,7 +98,7 @@ export function makePlayableMage(mageClass: MageClass = 'frost') {
   return {
     root, ready,
     animate(frame: MageFrame) {
-      rig?.animate(frame);
+      return rig?.animate(frame);
     },
   };
 }

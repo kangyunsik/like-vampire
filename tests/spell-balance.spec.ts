@@ -3,6 +3,8 @@ import { Combat } from '../src/combat';
 import { CHAIN_LIGHTNING, COOLDOWNS, UPGRADES } from '../src/data';
 
 const still = { x: 0, z: 0 };
+const hopDelay = CHAIN_LIGHTNING.hopDelay;
+const hops = (run: Combat) => run.events.filter((event) => event.kind === 'chain-lightning-hit');
 function arena(positions: readonly (readonly [number, number])[], roll = .5) {
   const run = new Combat([], () => roll);
   const template = run.enemies[0];
@@ -13,18 +15,28 @@ function arena(positions: readonly (readonly [number, number])[], roll = .5) {
   return run;
 }
 
-test('Chain Lightning clears the entire chill on each boosted hit and counts falloff by bounce', () => {
+test('Chain Lightning emits one immediate hit then timed bounces, consuming chill only at contact', () => {
   const run = arena([[0, 14], [0, 17.8], [0, 21.6]]);
   run.spells.add('chainLightning');
   run.enemies[0].slow = 4;
   run.enemies[0].chills = { bolt: { time: 4, power: .47 }, blizzard: { time: 2, power: .62 } };
   Object.assign(run.enemies[1], { frozen: 3, freezeSource: 'nova', slow: 2 });
   expect(run.cast('chainLightning', null, still)).toBe(true);
-  expect(run.enemies.map((enemy) => 1000 - enemy.hp)).toEqual([184, 166, 75]);
+  expect(run.cooldown.chainLightning).toBe(COOLDOWNS.chainLightning);
+  expect(run.enemies.map((enemy) => 1000 - enemy.hp)).toEqual([232, 0, 0]);
+  expect(hops(run)).toMatchObject([{ hop: 0, consumedChill: true }]);
+  run.step(hopDelay - .005, still);
+  expect(hops(run)).toHaveLength(1);
+  expect(run.enemies[1].frozen).toBeGreaterThan(0);
+  run.step(.006, still);
+  expect(run.enemies.map((enemy) => 1000 - enemy.hp)).toEqual([232, 209, 0]);
+  run.step(hopDelay, still);
+  expect(run.enemies.map((enemy) => 1000 - enemy.hp)).toEqual([232, 209, 94]);
   expect(run.enemies.every((enemy) => !enemy.slow && !enemy.frozen && !enemy.chills && !enemy.freezeSource)).toBe(true);
-  expect(run.spellDamage.get('chainLightning')).toBe(425);
-  expect(run.events).toContainEqual(expect.objectContaining({ kind: 'cast', spell: 'chainLightning', consumedChill: 2 }));
-  expect(run.cooldown.chainLightning).toBeCloseTo(COOLDOWNS.chainLightning);
+  expect(run.spellDamage.get('chainLightning')).toBe(535);
+  expect(hops(run)).toMatchObject([{ hop: 0, consumedChill: true }, { hop: 1, consumedChill: true }, { hop: 2, consumedChill: false }]);
+  expect(run.events.filter(({ kind }) => kind === 'cast' || kind === 'chain-lightning-hit' || kind === 'strike').map(({ kind }) => kind))
+    .toEqual(['cast', 'chain-lightning-hit', 'strike', 'chain-lightning-hit', 'strike', 'chain-lightning-hit', 'strike']);
 });
 
 for (const [rank, mitigation, multiplier, hits] of [[0, 0, 2, 11], [1, 1, 2.5, 13], [3, 5, 3, 17]] as const) {
@@ -34,8 +46,8 @@ for (const [rank, mitigation, multiplier, hits] of [[0, 0, 2, 11], [1, 1, 2.5, 1
     Object.assign(run.perks, { 'chain-lightning-links': rank, 'chain-lightning-loss': mitigation, 'chain-lightning-amplify': rank > 2 ? 2 : rank });
     run.enemies.forEach((enemy) => { enemy.slow = 2; });
     expect(run.cast('chainLightning', null, still)).toBe(true);
-    const cast = run.events.find((event) => event.kind === 'cast' && event.spell === 'chainLightning')!;
-    expect(cast).toMatchObject({ kind: 'cast', spell: 'chainLightning', path: expect.any(Array) });
+    for (let i = 0; i < hits + 1; i++) run.step(hopDelay, still);
+    expect(hops(run).map(({ hop, x, z }) => [hop, x, z])).toEqual(run.enemies.slice(0, hits).map(({ x, z }, i) => [i, x, z]));
     const damage = run.enemies.map((enemy) => 1000 - enemy.hp);
     expect(damage.slice(0, hits)).toEqual(Array.from({ length: hits }, (_, i) =>
       Math.round(CHAIN_LIGHTNING.damage * (1 - (CHAIN_LIGHTNING.loss - mitigation * CHAIN_LIGHTNING.mitigation) / 100) ** i * multiplier)));
@@ -48,9 +60,13 @@ test('Chain Lightning cannot jump behind the mage and its own critical hits neve
   run.spells.add('chainLightning');
   run.enemies.forEach((enemy) => { enemy.slow = 2; });
   expect(run.cast('chainLightning', null, still)).toBe(true);
-  expect(run.enemies.map((enemy) => enemy.slow)).toEqual([0, 0, 2]);
+  run.player.heading = Math.PI;
+  run.step(hopDelay * 3, still);
+  expect(run.enemies.slice(0, 2).map((enemy) => enemy.slow)).toEqual([0, 0]);
+  expect(run.enemies[2].slow).toBeGreaterThan(0);
   expect(run.enemies[2].hp).toBe(1000);
   expect(run.events.filter((event) => event.kind === 'strike').every((event) => event.critical)).toBe(true);
+  expect(run.lightningCharge).toBe(false);
 });
 
 test('Chain Lightning jumps to a chilled target ahead of a similarly close untouched one', () => {
@@ -58,10 +74,34 @@ test('Chain Lightning jumps to a chilled target ahead of a similarly close untou
   run.spells.add('chainLightning');
   run.enemies[2].slow = 2;
   expect(run.cast('chainLightning', null, still)).toBe(true);
-  expect(run.events).toContainEqual(expect.objectContaining({
-    kind: 'cast', spell: 'chainLightning', consumedChill: 1,
-    path: [{ x: 0, z: 0 }, { x: 0, z: 14 }, { x: -2.4, z: 15.9 }, { x: 2, z: 15.8 }],
-  }));
+  run.step(hopDelay * 2 + .001, still);
+  expect(hops(run)).toMatchObject([
+    { x: 0, z: 14, from: { x: 0, z: 0 }, consumedChill: false },
+    { x: -2.4, z: 15.9, from: { x: 0, z: 14 }, consumedChill: true },
+    { x: 2, z: 15.8, from: { x: -2.4, z: 15.9 }, consumedChill: false },
+  ]);
+});
+
+test('successful crits from other spells charge once, and a failed cast keeps the next-cast bonus', () => {
+  const run = arena([[0, 3], [1.8, 3]], 0);
+  run.enemies[0].hp = 1; // Even a killing crit contributes.
+  run.spells.add('chainLightning').add('frostGale');
+  expect(run.cast('frostGale', null, still)).toBe(true);
+  expect(run.events.filter(({ kind }) => kind === 'lightning-charge')).toHaveLength(1);
+  expect(run.lightningCharge).toBe(true);
+
+  run.enemies = arena([[0, 9], [1.9, 10]]).enemies;
+  Object.assign(run, { rng: () => .5 });
+  run.player.heading = Math.PI;
+  expect(run.cast('chainLightning', null, still)).toBe(false);
+  expect(run.lightningCharge).toBe(true);
+  run.player.heading = 0;
+  expect(run.cast('chainLightning', null, still)).toBe(true);
+  expect(run.lightningCharge).toBe(false);
+  run.step(hopDelay * 2, still);
+  expect(hops(run)).toMatchObject([{ hop: 0, charged: true }, { hop: 1, charged: true }]);
+  expect(run.enemies.map(({ hp }) => 1000 - hp)).toEqual([139, 125]);
+  expect(run.lightningCharge).toBe(false);
 });
 
 test('automatic chains apply slow first and fire before Aurora Strike without turning the mage', () => {
@@ -69,9 +109,10 @@ test('automatic chains apply slow first and fire before Aurora Strike without tu
   run.spells.add('auroraStrike').add('chainLightning').add('frostChain');
   run.step(.01, still);
   run.step(.34, still);
-  expect(run.events.filter((event) => event.kind === 'cast')).toMatchObject([
-    { spell: 'frostChain' }, { spell: 'chainLightning', consumedChill: 3 },
-  ]);
+  run.step(hopDelay * 2, still);
+  expect(run.events.filter((event) => event.kind === 'cast')).toMatchObject([{ spell: 'frostChain' }, { spell: 'chainLightning' }]);
+  expect(hops(run)).toHaveLength(3);
+  expect(hops(run).every(({ consumedChill }) => consumedChill)).toBe(true);
   expect(run.player.heading).toBe(0);
 });
 

@@ -57,14 +57,14 @@ test('the enlarged field keeps regular packs and old monsters at each stage tran
   }
 });
 
-test('the stage bosses spawn at the intended triple-health progression', () => {
-  const previousHp = [460, 940, 1520, 2250, 3250, 6900, 9600, 12_600, 16_000, 21_000];
+test('every stage boss spawns with half of its previous health', () => {
+  const health = [690, 1410, 2280, 3375, 4875, 10_350, 14_400, 18_900, 24_000, 31_500];
   for (const [index, stage] of STAGES.entries()) {
     const game = quiet();
     game.time = index * STAGE_TIME + (WAVE_COUNT - 1) * WAVE_TIME - .01;
     game.step(.02, still);
     expect(game.enemies.find((enemy) => enemy.kind === stage.boss.kind)).toMatchObject({
-      hp: previousHp[index] * 3, maxHp: previousHp[index] * 3,
+      hp: health[index], maxHp: health[index],
     });
   }
 });
@@ -307,12 +307,16 @@ test('a quest summons a separate mini-boss with warning patterns and only reward
   game.step(.02, still);
   const [stageBoss, questBoss] = [game.enemies.find((enemy) => enemy.kind === 'warden')!, game.questBoss!];
   expect(stageBoss.questNpcId).toBeUndefined();
-  expect(questBoss).toMatchObject({ kind: QUEST_BOSS, maxHp: 1200, questNpcId: npc.id });
+  expect(questBoss).toMatchObject({ kind: QUEST_BOSS, hp: 600, maxHp: 600, questNpcId: npc.id });
   expect(questBoss.z).toBeLessThan(0);
   expect(game.events).toContainEqual({ kind: 'quest-boss' });
   expect(game.events).toContainEqual({ kind: 'boss', boss: 'warden' });
   advance(game, 2.4);
-  expect(game.hazards.some((hazard) => hazard.cue === 'riftPulse')).toBe(true);
+  const rift = game.hazards.find((hazard) => hazard.cue === 'riftPulse')!;
+  expect(rift).toBeDefined();
+  const range = Math.hypot(rift.x - game.player.x, rift.z - game.player.z);
+  expect(range).toBeGreaterThan(0);
+  expect(range + rift.radius).toBeLessThanOrEqual(game.moveSpeed * rift.windup + 1e-6);
   advance(game, 5.60);
   expect(game.hazards.some((hazard) => hazard.cue === 'riftLine')).toBe(true);
   defeatInFront(game, [stageBoss]);
@@ -348,6 +352,7 @@ test('an exploration quest generates three separated signals, removed only when 
 
 function bossFixture(index: number, cycle = 0, obstacles: ConstructorParameters<typeof Combat>[0] = []) {
   const game = quiet(obstacles);
+  Object.assign(game, { attackRng: () => .5 });
   game.time = index * STAGE_TIME + (WAVE_COUNT - 1) * WAVE_TIME - .01;
   game.step(.02, still);
   const boss = game.enemies.find((enemy) => enemy.kind === game.stage.boss.kind)!;
@@ -400,7 +405,9 @@ for (const [index, cue] of [[7, 'stormCharge'], [9, 'dawnCharge']] as const) {
     const [mark] = game.hazards;
     expect(mark.cue).toBe(cue);
     const charge = mark.charge!;
-    expect(charge.to).toMatchObject({ x: 0, z: 2.5 });
+    expect(charge.to.x).toBeCloseTo(0);
+    expect(charge.to.z).toBeGreaterThan(0);
+    expect(Math.hypot(charge.to.x, charge.to.z) + mark.radius).toBeLessThanOrEqual(game.moveSpeed * mark.windup);
     expect(boss.bracing).toBe(true);
     advance(game, mark.windup - .04);
     expect(boss.z).toBe(-8);
@@ -453,20 +460,24 @@ for (const [index, [kind, stats]] of Object.entries(RANGED_ELITES).entries()) {
     const hit = armRanged();
     const mark = hit.hazards[0];
     const attack = stats.attack;
-    expect(mark).toMatchObject({ x: 0, z: 0, radius: attack.radius, windup: attack.windup, cue: attack.cue, elite: true });
+    expect(mark).toMatchObject({ radius: attack.radius, windup: attack.windup, cue: attack.cue, elite: true });
+    const range = Math.hypot(mark.x, mark.z);
+    expect(range).toBeGreaterThan(0);
+    expect(range + mark.radius).toBeLessThanOrEqual(hit.moveSpeed * attack.windup + 1e-6);
     expect(hit.hazards).toHaveLength(attack.offsets.length);
     expect(hit.events).toContainEqual(expect.objectContaining({ kind: 'enemy-warning', cue: attack.cue, elite: true }));
     advance(hit, attack.windup - .04);
     expect(hit.hp).toBe(100);
     expect(Math.abs(hit.enemies[0].z)).toBeCloseTo(stats.hold, 0);
+    Object.assign(hit.player, { x: mark.x, z: mark.z });
     advance(hit, .08);
     expect(hit.hp).toBe(100 - attack.damage);
-    expect(hit.events).toContainEqual({ kind: 'enemy-blast', x: 0, z: 0, radius: mark.radius, cue: attack.cue, elite: true });
+    expect(hit.events).toContainEqual({ kind: 'enemy-blast', x: mark.x, z: mark.z, radius: mark.radius, cue: attack.cue, elite: true });
 
     const dodge = armRanged(true);
     const leadMark = dodge.hazards[0];
     const x = leadMark.x;
-    expect(x - dodge.player.x).toBeGreaterThan(1);
+    expect(Math.hypot(x - dodge.player.x, leadMark.z - dodge.player.z)).toBeGreaterThan(.1);
     for (let i = 0; i < 90; i++) dodge.step(.022, { x: 1, z: 0 });
     expect(leadMark.x).toBe(x);
     expect(dodge.hp).toBe(100);

@@ -23,6 +23,9 @@ export function buildChoice(game, style, rarities) {
       const spell = choice.spell;
       let value = scores[spell] ?? 0;
       if (game.spells.size >= 7) value -= 11;
+      // A balanced run needs protection as well as damage, especially while
+      // running expeditions through intersecting enemy patterns.
+      if (style === 'balanced' && (spell === 'fireBarrier' || spell === 'barrier')) value += game.level >= 10 ? 9 : 4;
       if (style === 'elemental' && rarities[spell] !== 'common') value += 4;
       if ((style === 'area' || style === 'blizzard') && areaSpells[game.mageClass].includes(spell)) value += 7;
       if (spell === 'pyro' && !game.spells.has('fireBlast')) value -= 7;
@@ -112,7 +115,7 @@ export function steering(game, fieldX, fieldZ, target, camp) {
         Math.max(.001, Math.hypot(dx, dz));
       return { dx, dz, vx: -dx * speed, vz: -dz * speed, radius: enemy.radius };
     });
-  const hazards = game.hazards.filter((hazard) => hazard.delay <= hazard.windup && hazard.delay <= 1.45);
+  const hazards = game.hazards.filter((hazard) => hazard.delay <= hazard.windup);
   let gem, gemScore = -Infinity;
   for (const pickup of game.pickups) {
     const d = Math.sqrt(sq(pickup.x - x, pickup.z - z));
@@ -121,7 +124,7 @@ export function steering(game, fieldX, fieldZ, target, camp) {
     if (value > gemScore) { gem = pickup; gemScore = value; }
   }
   let best = { x: 0, z: 0 }, bestScore = -Infinity;
-  const horizon = .58, speed = game.moveSpeed;
+  const horizon = .58, speed = game.moveSpeed, caution = game.hp < game.maxHp * .45 ? 1.6 : 1;
   const periodic = (value, center, half) => value - Math.round((value - center) / (2 * half)) * 2 * half;
   const cx = periodic(camp?.x ?? 0, x, fieldX), cz = periodic(camp?.z ?? 0, z, fieldZ);
   for (let i = 0; i < 16; i++) {
@@ -138,12 +141,12 @@ export function steering(game, fieldX, fieldZ, target, camp) {
       const t = Math.max(0, Math.min(horizon, -(enemy.dx * vx + enemy.dz * vz) / Math.max(.001, sq(vx, vz))));
       const closest = Math.hypot(enemy.dx + vx * t, enemy.dz + vz * t) - enemy.radius;
       const finish = Math.hypot(enemy.dx + vx * horizon, enemy.dz + vz * horizon) - enemy.radius;
-      score -= Math.max(0, 1.35 - closest) ** 2 * 4 + Math.max(0, 2.5 - finish) ** 2 * .6;
+      score -= caution * (Math.max(0, 1.35 - closest) ** 2 * 4 + Math.max(0, 2.5 - finish) ** 2 * .6);
     }
     for (const hazard of hazards) {
       const distance = hazard.delay * speed;
       const margin = hazardDistance(hazard, x + dx * distance, z + dz * distance) - hazard.radius;
-      score -= Math.max(0, .75 - margin) ** 2 * 4.3;
+      score -= caution * Math.max(0, .75 - margin) ** 2 * 4.3;
     }
     if (score > bestScore) { bestScore = score; best = { x: dx, z: dz }; }
   }

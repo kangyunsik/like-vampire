@@ -1,9 +1,9 @@
 import * as T from 'three';
 import type { CombatEvent, Point } from '../combat';
-import type { MageClass } from '../data';
+import { GUST_FORWARD_DOT, type MageClass } from '../data';
 import { crystalGeometry, random } from './art';
 import { bossHazardTone } from './boss-hazards';
-import { crossedStrips, effectDisc, effectFan, effectPlane, etchedSurface, moltenCore, streamingRibbon,
+import { crossedStrips, effectDisc, effectFan, effectPlane, etchedSurface, gustFront, moltenCore, streamingRibbon,
   type Etching, type RibbonStroke } from './element-vfx';
 import { frostSigil, frostVapor, prismaticIce } from './frost-vfx';
 import { GlacialImpact } from './glacial-impact';
@@ -198,6 +198,15 @@ export class SpellFlashes {
   }
 
   add(event: CombatEvent, staff?: T.Vector3, mageClass: MageClass = 'frost') {
+    if (event.kind === 'chain-lightning-hit') {
+      const tint = event.charged ? '#ad79ff' : '#7668ff', core = event.charged ? '#fff6ba' : '#e2f8ff';
+      this.links([event.from, event], tint, core, .14, true, event.hop === 0 ? staff : undefined);
+      const flash = this.etch(event, event.consumedChill ? .72 : .51, 'lattice', tint, core, .20,
+        { vertical: true, lift: .94, alpha: .91 });
+      flash.name = 'chain-lightning-impact';
+      if (event.consumedChill) this.scatter(event, 4, false, 1.4, .76);
+      return;
+    }
     if (event.kind === 'frost-crit-freeze') {
       this.floor(event, snow, .76, '#c4faff', .42, .85);
       this.iceCrystals(event, .37, '#aeeeff', .44, event.x * .59 + event.z);
@@ -341,9 +350,14 @@ export class SpellFlashes {
       } else if (spell === 'fireball') {
         this.etch(event, radius * .77, 'slag', '#bd5028', '#ffad58', .35, { alpha: .51 });
       } else if (spell === 'fireBlast') {
-        this.etch(event, radius, 'eclipse', '#e85a21', '#fff4b6', .49);
-        this.tongues(event, radius * .37, 1.12, 4, .32);
-        this.scatter(event, 11, true, 2.8, .77);
+        const flash = this.etch(event, .94, 'eclipse', '#ff592c', '#fff8b5', .22, { vertical: true, lift: 1.04, alpha: 1 });
+        flash.name = 'fire-blast-core';
+        const pressure = this.etch(event, radius, 'eclipse', '#eb482a', '#fff0a5', .34, { lift: .18, alpha: .98 });
+        pressure.name = 'fire-blast-pressure';
+        this.etch(event, radius * .86, 'slag', '#aa321d', '#ffab5c', .62, { alpha: .43, delay: .09, lift: .15 });
+        this.tongues(event, radius * .49, 1.35, 5, .29, '#f94f25', '#fff1ad');
+        this.scatter(event, 15, true, 2.5, .73);
+        this.wake(event, radius * .65, .45, true, .72);
       } else if (spell === 'fireBarrier') {
         this.etch(event, radius, 'spiral', '#d75d30', '#ffc171', .42, { alpha: .53, spin: .9 });
       } else if (spell === 'barrier') {
@@ -458,13 +472,17 @@ export class SpellFlashes {
         this.focus(event, staff, 'spiral', '#5c70cf', '#e0d3ff', .43, .44, -2.94);
         break;
       case 'chainLightning':
-        if (path) this.links(path, '#a179ff', '#fff2b6', .55, true, staff);
+        // The arc and impact belong to each resolved hit, not the cast's initial target list.
         break;
       case 'fireball':
         this.focus(event, staff, 'brand', '#ff602e', '#ffe9a5', .27, .23, -1.71);
         break;
       case 'fireBlast':
-        if (to) this.links([event, to], '#e45824', '#fff1bc', .23, true, staff);
+        if (to) {
+          const origin = staff?.clone() ?? point3(event, 1.13), end = point3(to, .98);
+          const mid = origin.clone().lerp(end, .55).add(new T.Vector3(0, .10, 0));
+          this.stream([{ points: [origin, mid, end], width: .16 }], origin, '#ff5327', '#fff3b8', .14);
+        }
         break;
       case 'pyro':
         this.focus(event, staff, 'eclipse', '#eb4826', '#fff0a6', .46, .39, 1.74);
@@ -593,17 +611,43 @@ export class SpellFlashes {
     const origin = staff?.clone() ?? point3(from, 1.13);
     const aim = Math.atan2(target.x - from.x, target.z - from.z);
     const angle = Math.atan2(Math.sin(aim - heading), Math.cos(aim - heading));
+    const half = Math.acos(GUST_FORWARD_DOT);
+    const left = heading + Math.max(-Math.PI / 2, angle - half), right = heading + Math.min(Math.PI / 2, angle + half);
+    const positions: number[] = [], texels: number[] = [], indices: number[] = [];
+    const y = heightAt(from.x, from.z), columns = 30, bands = 8;
+    for (let j = 0; j <= bands; j++) for (let i = 0; i <= columns; i++) {
+      const u = i / columns, r = j / bands, a = T.MathUtils.lerp(left, right, u);
+      const x = Math.sin(a) * r, z = Math.cos(a) * r;
+      positions.push(x, heightAt(from.x + x * radius, from.z + z * radius) - y + .18, z);
+      texels.push(u, r);
+      if (i && j) {
+        const q = j * (columns + 1) + i;
+        indices.push(q - columns - 2, q - 1, q, q - columns - 2, q, q - columns - 1);
+      }
+    }
+    const surface = new T.BufferGeometry()
+      .setAttribute('position', new T.Float32BufferAttribute(positions, 3))
+      .setAttribute('uv', new T.Float32BufferAttribute(texels, 2)).setIndex(indices);
+    const front = this.flash(surface, '', .96, hot ? .43 : .52, { shader: gustFront(hot), ownsGeometry: true });
+    front.name = hot ? 'ember-cone-front' : 'frost-cone-front';
+    front.position.set(from.x, y, from.z);
+    front.scale.set(radius, 1, radius);
+    front.renderOrder = -2;
     const strokes: RibbonStroke[] = [];
     for (let i = -3; i <= 3; i++) {
-      const d = radius * (1 - Math.abs(i) * .088), a = heading + T.MathUtils.clamp(angle + i * .305, -Math.PI / 2, Math.PI / 2);
-      const mid = point3({ x: from.x + Math.sin(a - .15) * d * .59, z: from.z + Math.cos(a - .15) * d * .59 }, hot ? .98 : .39);
+      const d = radius * (1 - Math.abs(i) * .055), a = T.MathUtils.lerp(left, right, (i + 3.35) / 6.7);
+      const inward = a + ((left + right) * .5 - a) * .16;
+      const mid = point3({ x: from.x + Math.sin(inward) * d * .59, z: from.z + Math.cos(inward) * d * .59 }, hot ? .98 : .39);
       const end = point3({ x: from.x + Math.sin(a) * d, z: from.z + Math.cos(a) * d }, hot ? .69 + (i % 2) * .17 : .24);
       const bend = mid.clone().lerp(end, .43);
       bend.y += hot ? .24 : .12;
       strokes.push({ points: [origin, mid, bend, end], width: hot ? .25 - Math.abs(i) * .03 : .17 - Math.abs(i) * .023 });
     }
-    this.stream(strokes, origin, hot ? '#ed4d30' : '#4c9dc5', hot ? '#ffdc87' : '#d7fbff', hot ? .53 : .61);
-    this.scatter(target, hot ? 13 : 9, hot, 2.14, .42, aim);
+    this.stream(strokes, origin, hot ? '#ed4d30' : '#4196cb', hot ? '#ffdc87' : '#d7fbff', hot ? .44 : .51);
+    for (const lane of [.21, .53, .81]) {
+      const a = T.MathUtils.lerp(left, right, lane), d = radius * .68;
+      this.scatter({ x: from.x + Math.sin(a) * d, z: from.z + Math.cos(a) * d }, hot ? 4 : 3, hot, 1.5, .32, a);
+    }
   }
 
   private tongues(center: Point, radius: number, height: number, count: number, life: number, tint = '#e85224', core = '#ffe0a0') {

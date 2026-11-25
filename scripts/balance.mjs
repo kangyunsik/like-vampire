@@ -60,7 +60,7 @@ function random(seed) {
 
 const dt = 1 / 30;
 const empty = () => ({ seconds: 0, damage: 0, effective: 0, dot: 0, taken: 0, kills: 0, bosses: 0, bossSpawns: 0, levels: 0,
-  control: 0, burning: 0, enemies: 0, consumedChill: 0, bombTransfers: 0, casts: {}, hits: {}, bySpell: {}, utility: {} });
+  control: 0, burning: 0, enemies: 0, consumedChill: 0, chargedLightning: 0, bombTransfers: 0, casts: {}, hits: {}, bySpell: {}, utility: {} });
 const emptyUtility = () => ({ frozenSeconds: 0, slowEquivalentSeconds: 0, absorbed: 0, interruptions: 0 });
 const utility = (stats, spell) => stats.utility[spell] ??= emptyUtility();
 const stages = ['early', 'middle', 'late', 'endgame'];
@@ -117,7 +117,10 @@ function simulate(id, style, seed) {
       if (event.kind === 'cast') {
         if (event.spell === 'livingBomb' && event.path) stats.bombTransfers += event.path.length - 1;
         else stats.casts[event.spell] = (stats.casts[event.spell] ?? 0) + 1;
-        stats.consumedChill += event.consumedChill ?? 0;
+      }
+      if (event.kind === 'chain-lightning-hit') {
+        if (event.consumedChill) stats.consumedChill++;
+        if (!event.hop && event.charged) stats.chargedLightning++;
       }
       if (event.kind === 'boss') stats.bossSpawns++;
       if (event.kind === 'hurt') stats.taken += event.damage;
@@ -179,7 +182,10 @@ function simulate(id, style, seed) {
       hitsPerCast: casts ? hits / casts : 0,
       damagePerCast: casts ? damageSinceLearning / casts : 0,
       damagePerMinute: secondsKnown ? damageSinceLearning * 60 / secondsKnown : 0,
-      ...(spell === 'chainLightning' ? { consumedChill: summary.reduce((total, phase) => total + phase.consumedChill, 0) } : {}),
+      ...(spell === 'chainLightning' ? {
+        consumedChill: summary.reduce((total, phase) => total + phase.consumedChill, 0),
+        chargedCasts: summary.reduce((total, phase) => total + phase.chargedLightning, 0),
+      } : {}),
       ...(spell === 'livingBomb' ? { transfers: summary.reduce((total, phase) => total + phase.bombTransfers, 0) } : {}),
       starterDamageInWindow: (spellDamage[starter] ?? 0) - starterDamage,
     }];

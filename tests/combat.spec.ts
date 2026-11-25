@@ -569,12 +569,15 @@ for (const [stageIndex, count, damage] of [[1, 1, 24], [2, 3, 32], [3, 5, 38], [
     }
     const hit = prepare();
     expect(hit.hazards).toHaveLength(count);
-    expect(hit.hazards[0]).toMatchObject({ x: 0, z: 0, damage });
     const { cue, radius } = hit.stage.boss.attack!;
-    expect(hit.hazards.every((hazard) => hazard.cue === cue && hazard.radius === radius)).toBe(true);
+    expect(hit.hazards.every((hazard) => hazard.cue === cue && hazard.radius === radius && hazard.damage === damage)).toBe(true);
+    expect(Math.hypot(hit.hazards[0].x, hit.hazards[0].z)).toBeGreaterThan(0);
     const expectedBlasts = hit.hazards.map(({ x, z }) => ({ kind: 'enemy-blast', x, z, radius, cue }));
     expect(new Set(hit.hazards.map(({ x, z }) => `${x},${z}`)).size).toBe(count);
     const windup = hit.hazards[0].windup;
+    for (const { x, z } of hit.hazards) expect(Math.hypot(x, z) + radius).toBeLessThanOrEqual(hit.moveSpeed * windup + 1e-6);
+    const { x, z } = hit.hazards[0];
+    Object.assign(hit.player, { x, z });
     advance(hit, windup - .05);
     expect(hit.hp).toBe(100);
     advance(hit, .1);

@@ -1,7 +1,7 @@
 import * as T from 'three';
 import type { Combat } from '../combat';
 import { QUESTS, SUPPLIES, SUPPLY_KINDS, type SupplyKind } from '../expedition';
-import { crystalGeometry, oval, part, ring, surface } from './art';
+import { crystalGeometry, oval, paint, part, ring, surface } from './art';
 import { heightAt } from './terrain';
 
 const accent = '#ffd786';
@@ -14,6 +14,29 @@ const mark = glow(accent), floor = glow(accent, .78);
 const lantern = surface('#ffcf74', .64);
 const markerBar = new T.BoxGeometry(.12, .41, .115);
 const markerDot = new T.BoxGeometry(.12, .12, .115);
+let progressMark: T.SpriteMaterial | undefined;
+
+function makeProgressMark() {
+  return new T.SpriteMaterial({
+    color: '#b7b7b7', transparent: true, depthWrite: false, toneMapped: false,
+    map: paint(96, (ctx) => {
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(31, 27);
+      ctx.bezierCurveTo(31, 9, 66, 8, 66, 27);
+      ctx.bezierCurveTo(66, 43, 48, 43, 48, 56);
+      ctx.lineTo(48, 59);
+      ctx.moveTo(48, 77);
+      ctx.lineTo(48, 79);
+      ctx.lineWidth = 19;
+      ctx.strokeStyle = '#292a32';
+      ctx.stroke();
+      ctx.lineWidth = 11;
+      ctx.strokeStyle = '#ffffff';
+      ctx.stroke();
+    }),
+  });
+}
 
 function makeGuide(scene: T.Scene) {
   const root = new T.Group(), model = new T.Group(), beacon = new T.Group();
@@ -33,9 +56,14 @@ function makeGuide(scene: T.Scene) {
   }
   part(model, staff, leather, .68, 1.16, .26);
   part(model, crystalGeometry, lantern, .68, 2.15, .26).scale.set(.16, .32, .16);
-  part(beacon, markerBar, mark, 0, .14);
-  part(beacon, markerDot, mark, 0, -.16);
-  return { root, model, beacon, level };
+  const available = new T.Group(), active = new T.Sprite(progressMark ??= makeProgressMark());
+  available.name = 'quest-available';
+  active.name = 'quest-in-progress';
+  active.scale.set(.74, .74, 1);
+  part(available, markerBar, mark, 0, .14);
+  part(available, markerDot, mark, 0, -.16);
+  beacon.add(available, active);
+  return { root, model, beacon, level, available, active };
 }
 
 const heart = new T.Shape();
@@ -94,18 +122,20 @@ export class ExpeditionArt {
 
   update(game: Combat | null, time: number, view: Visible) {
     const npcs = game?.questNpcs ?? [];
+    const activeNpc = game?.quest?.npc.id;
     for (const [i, npc] of npcs.entries()) {
       const art = this.guides[i] ??= makeGuide(this.scene);
+      art.available.visible = art.level.visible = !npc.done && activeNpc === undefined;
+      art.active.visible = !npc.done && activeNpc === npc.id;
+      art.beacon.visible = art.available.visible || art.active.visible;
       const y = heightAt(npc.x, npc.z);
       art.root.visible = view(npc.x, y + 1.65, npc.z, 2);
       if (!art.root.visible) continue;
       art.root.position.set(npc.x, y, npc.z);
       const p = game!.player;
       art.model.rotation.y = Math.atan2(p.x - npc.x, p.z - npc.z);
-      art.beacon.visible = !npc.done;
-      art.level.visible = !npc.done;
       art.beacon.position.y = 2.97 + Math.sin(time * 3 + npc.id) * .12;
-      art.beacon.rotation.y = time * .9;
+      art.available.rotation.y = time * .9;
     }
     for (let i = npcs.length; i < this.guides.length; i++) this.guides[i].root.visible = false;
     for (const [i, art] of this.signals.entries()) {

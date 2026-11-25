@@ -1,5 +1,5 @@
 import * as T from 'three';
-import type { Combat, CombatEvent, Enemy, Hazard, Point } from '../combat';
+import type { Combat, CombatEvent, Enemy, Point } from '../combat';
 import { makeEnemy } from './actors';
 import { crystalGeometry, part, random, ring, surface } from './art';
 import { OrbitCamera } from './camera';
@@ -13,8 +13,8 @@ import { groundSquare, heightAt, makeShadowMaterial, makeTerrain } from './terra
 import { SpellFlashes, frostShard, iceSpear, phoenixWing } from './spell-effects';
 import { CasterAuras, SpellFields } from './spell-fields';
 import { WinterWeather } from './winter-weather';
-import { BOSS_ATTACK_LABELS, ENEMY_KINDS, PICKUP_STYLES, QUEST_BOSS, QUEST_BOSS_NAME, STAGES, WAVE_MOB_LIMIT, isBoss, rangedElite,
-  type BossAttackCue, type EnemyKind, type MageClass, type Spell } from '../data';
+import { ENEMY_KINDS, PICKUP_STYLES, QUEST_BOSS, QUEST_BOSS_NAME, STAGES, WAVE_MOB_LIMIT, isBoss, rangedElite,
+  type EnemyKind, type MageClass, type Spell } from '../data';
 import { SUPPLIES } from '../expedition';
 
 const CAPACITY = WAVE_MOB_LIMIT + 64;
@@ -30,7 +30,7 @@ const gemRing = new T.RingGeometry(.82, 1, 24).rotateX(-Math.PI / 2);
 const gemGlow = new T.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: .94, depthWrite: false, toneMapped: false, side: T.DoubleSide });
 const gemColors = Object.fromEntries(Object.entries(PICKUP_STYLES).map(([tier, look]) => [tier, { core: new T.Color(look.core), halo: new T.Color(look.halo) }]));
 const fireBright = surface('#ffe49d', .84, true);
-const staffEmissions = new Set<Spell>(['bolt', 'lance', 'fireball', 'pyro', 'phoenix', 'orb', 'frostChain', 'chainLightning', 'rimeVolley', 'emberFan', 'frostGale', 'cinderMarks']);
+const staffEmissions = new Set<Spell>(['bolt', 'lance', 'fireball', 'fireBlast', 'pyro', 'phoenix', 'orb', 'frostChain', 'chainLightning', 'rimeVolley', 'emberFan', 'frostGale', 'cinderMarks']);
 const atmospheres = {
   grove: { fog: '#7884bb', background: '#8391c7', sky: '#d2e8ff', ground: '#9289be', sun: '#fff2e2', bounce: '#aabfff', moon: '#d9bdff', air: '#ffffff', turf: '#ffffff' },
   cavern: { fog: '#2e758b', background: '#27576d', sky: '#a9ffed', ground: '#5ba3ad', sun: '#aff2ff', bounce: '#57e4c9', moon: '#adbbff', air: '#8fffee', turf: '#83c0cd' },
@@ -281,7 +281,7 @@ export class World {
   addEvent(event: CombatEvent) {
     if ('bombPower' in event && (event.bombPower ?? 1) < .06) return;
     if (event.kind === 'strike' && event.spell === 'livingBomb' && event.damage < 1) return;
-    const tip = event.kind === 'cast' ? this.staffOrigin() : undefined;
+    const tip = event.kind === 'cast' || (event.kind === 'chain-lightning-hit' && !event.hop) ? this.staffOrigin() : undefined;
     this.spellFlashes.add(event, tip, this.mageClass);
     if (event.kind === 'enemy-blast') {
       const { form, color } = bossHazardTone(event.cue);
@@ -317,8 +317,6 @@ export class World {
       } else if (event.spell === 'fireBarrier' || event.spell === 'combustion') {
         this.wave(event.x, event.z, event.spell === 'combustion' ? 2.2 : 1.42, .48, '#ffb476', .89);
         this.burst(event.x, event.z, 13, 1.16, 1.7, true);
-      } else if (event.spell === 'fireBlast' && event.to) {
-        this.burst(event.to.x, event.to.z, 13, 1.03, 1.6, true);
       } else if (!staffEmissions.has(event.spell)) {
         this.burst(event.x, event.z, 4, 1.25, .93, this.mageClass === 'fire' && event.spell !== 'blink');
       }
@@ -507,15 +505,16 @@ export class World {
       if (!point) continue;
       const { x, y, z } = point;
       const wake = Math.min(1, (orb.age ?? .13) / .13);
-      const radius = .23 + .16 * wake;
+      const growth = orb.radius / orb.baseRadius;
+      const radius = (.23 + .16 * wake) * growth;
       this.set(this.orbCore, this.orbCore.count, x, y, z, radius, radius * .95, radius, time * 4.1, time * 3.1);
       for (let i = 0; i < 2; i++) this.set(this.orbBands, this.orbBands.count, x, y, z,
         radius * (1.55 + i * .31), radius * (1.55 + i * .31), 1, time * (3 - i * 7), .74 + i * 1.11, time * (i ? -3.2 : 4.1));
       if (wake > .8) this.set(this.spellRings, this.spellRings.count, orb.x, heightAt(orb.x, orb.z) + .15, orb.z, orb.radius, 1, orb.radius);
       for (let i = 0; i < 7; i++) {
-        const a = time * 7 + i * 2.399, r = (.49 + i * .115) * wake, index = this.magic.count;
+        const a = time * 7 + i * 2.399, r = (.49 + i * .115) * wake * growth, index = this.magic.count;
         if (index >= this.magic.instanceMatrix.count) break;
-        this.set(this.magic, index, x + Math.cos(a) * r - orb.vx * i * .022 * wake, y + .39 * Math.sin(a * 1.3) * wake,
+        this.set(this.magic, index, x + Math.cos(a) * r - orb.vx * i * .022 * wake, y + .39 * Math.sin(a * 1.3) * wake * growth,
           z + Math.sin(a) * r - orb.vz * i * .022 * wake, .065, .13, .065, a);
         this.magic.setColorAt(index, shades[i % shades.length]);
       }
@@ -622,7 +621,10 @@ export class World {
     const facing = p?.heading ?? -.115 + Math.sin(time * .79) * .046;
     const r = this.mage.root.rotation.y;
     this.mage.root.rotation.y += Math.atan2(Math.sin(facing - r), Math.cos(facing - r)) * Math.min(1, blend * 2.1);
-    this.mage.animate({ time, dt: dtFx, menu: !game, moving: Boolean(p?.moving), forward: p ? Math.cos(p.moveAngle - p.heading) : 0,
+    const movement = game?.movement, sin = Math.sin(this.mage.root.rotation.y), cos = Math.cos(this.mage.root.rotation.y);
+    const footfall = this.mage.animate({ time, dt: dtFx, menu: !game,
+      side: movement ? movement.x * cos - movement.z * sin : 0,
+      forward: movement ? movement.x * sin + movement.z * cos : 0,
       casting: p?.casting ?? 0, castSide: p?.castSide, pose: p?.pose, hurt: Boolean(p?.hurt) });
     this.mageShadow.position.set(x + .09, y + .135, z + .075);
     this.mageShadow.scale.set(this.modelScale * 2.32, 1, this.modelScale * 1.76);
@@ -756,6 +758,7 @@ export class World {
     this.spellFlashes.update(dtFx, camera);
     this.renderer.render(this.scene, camera);
     this.updateLabels(dtFx, game);
+    return footfall;
   }
 
   private updateEffects(dt: number, time: number, game: Combat | null) {
@@ -849,39 +852,6 @@ export class World {
     }
     ctx.globalAlpha = 1;
     this.drawEnemyHealthBars(game);
-    this.drawBossAttackLabels(game);
-  }
-
-  private drawBossAttackLabels(game: Combat) {
-    const targets = new Map<BossAttackCue, { hazard: Hazard; x: number; y: number; distance: number }>();
-    for (const hazard of game.hazards) {
-      if (!hazard.cue || hazard.delay > hazard.windup) continue;
-      const x = hazard.charge ? T.MathUtils.lerp(hazard.x, hazard.charge.to.x, .64) : hazard.x;
-      const z = hazard.charge ? T.MathUtils.lerp(hazard.z, hazard.charge.to.z, .64) : hazard.z;
-      const point = this.screen(x, heightAt(x, z) + .78, z);
-      if (!point || point.x < 40 || point.x > this.width - 40 || point.y < 20 || point.y > this.height - 40) continue;
-      const distance = (game.player.x - x) ** 2 + (game.player.z - z) ** 2;
-      if (distance < (targets.get(hazard.cue)?.distance ?? Infinity)) targets.set(hazard.cue, { hazard, ...point, distance });
-    }
-    if (!targets.size) return;
-    const ctx = this.context;
-    ctx.save();
-    ctx.font = '750 12px "Noto Sans KR Variable", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    for (const [cue, { hazard, x, y }] of targets) {
-      const label = `${BOSS_ATTACK_LABELS[cue]}${hazard.slow ? ' (둔화)' : ''} · ${(Math.ceil(hazard.delay * 10) / 10).toFixed(1)}초`;
-      const width = ctx.measureText(label).width + 18;
-      const left = Math.max(4, Math.min(this.width - width - 4, x - width / 2));
-      ctx.fillStyle = '#25101deb';
-      ctx.fillRect(left, y - 21, width, 20);
-      ctx.strokeStyle = hazard.elite ? '#ffbd80' : '#ff8589';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(left + .5, y - 20.5, width - 1, 19);
-      ctx.fillStyle = bossHazardTone(cue).color;
-      ctx.fillText(label, left + width / 2, y - 11);
-    }
-    ctx.restore();
   }
 
   private drawEnemyHealthBars(game: Combat) {

@@ -3,7 +3,7 @@ export const WAVE_COUNT = 5;
 export const STAGE_TIME = WAVE_TIME * WAVE_COUNT;
 export const FIELD_X = 480;
 export const FIELD_Z = 360;
-export const BOSS_HEALTH_MULTIPLIER = 3;
+export const BOSS_HEALTH_MULTIPLIER = 1.5;
 export const WAVE_MOB_LIMIT = 192;
 export type Obstacle = { x: number; z: number; radius: number; canopy?: { radius: number; height: number } };
 
@@ -31,16 +31,10 @@ export function isBoss(kind: EnemyKind): kind is BossKind {
 }
 
 type SpawnPool = readonly (readonly [MobKind, number])[];
-export const BOSS_ATTACK_LABELS = {
-  prism: '수정 폭발', queen: '달서리 삼연타', glacier: '빙하 십자 낙하', eclipse: '극야 불꽃 고리',
-  gearLine: '태엽 직선 포격', gearCross: '태엽 십자 포격', abyssTrack: '심연 추적 폭발', abyssLine: '심연 연속 포격',
-  riftPulse: '균열 파동', riftLine: '균열 연속 낙하',
-  stormShot: '번개 낙점', oracleShot: '균열 연속 사격', dawnShot: '태양탄',
-  stormCross: '뇌전 십자', stormVolley: '낙뢰 연속 포격', riftRing: '공허 포위', riftChase: '균열 추적',
-  dawnRing: '여명의 진혼', dawnCross: '태양 십자 포격',
-  stormCharge: '뇌전 돌진', dawnCharge: '여명 돌격',
-} as const;
-export type BossAttackCue = keyof typeof BOSS_ATTACK_LABELS;
+export type BossAttackCue = 'prism' | 'queen' | 'glacier' | 'eclipse'
+  | 'gearLine' | 'gearCross' | 'abyssTrack' | 'abyssLine' | 'riftPulse' | 'riftLine'
+  | 'stormShot' | 'oracleShot' | 'dawnShot' | 'stormCross' | 'stormVolley'
+  | 'riftRing' | 'riftChase' | 'dawnRing' | 'dawnCross' | 'stormCharge' | 'dawnCharge';
 export type SlowDebuff = { seconds: number; percent: number };
 export const CLOCKWORK_SLOW: SlowDebuff = { seconds: 3, percent: 30 };
 type BossAttack = {
@@ -230,6 +224,7 @@ export const IGNITE_PERCENT = 35;
 export const IGNITE_TICKS = 4;
 export const IGNITE_UPGRADE_PERCENT = 16;
 export const INFERNO_BURN_BOOST_PERCENT = 65;
+export const INFERNO_HEART = { duration: 6, durationStep: 10 } as const;
 export const BOMB_SPREAD_BY_RANK = [0, 10, 20, 30, 40, 50, 55, 60, 65, 70, 75] as const;
 export const BOMB_MIN_SPREAD_POWER = .06;
 export const BOMB_RADIUS_PERCENT = 20;
@@ -254,9 +249,12 @@ export const FROST_CRITICAL_DETAIL = `냉기 주문 치명타는 적을 ${FROST_
 export const FROST_BIND = { cooldown: 3.6, freeze: 1.5, damage: 39, spreadRange: 3.2, spreadFreeze: .85,
   spreadDamage: 55, reclaimTime: 2.5, refund: .6 } as const;
 export const FROST_CHAIN = { damage: 50, targets: 4, extra: 2, jumpRadius: 4.4, loss: 8 } as const;
-export const CHAIN_LIGHTNING = { damage: 92, bounces: 10, extra: 2, loss: 10, mitigation: 2, amplify: 2, amplifyStep: .5 } as const;
+export const CHAIN_LIGHTNING = { damage: 116, bounces: 10, extra: 2, loss: 10, mitigation: 2,
+  amplify: 2, amplifyStep: .5, hopDelay: .055, chargePercent: 20 } as const;
 export const GLACIER_WALL = { life: 3, lifeStep: 1, halfLength: 3.2, halfWidth: .53, sizeStep: 20 } as const;
 export const ABSOLUTE_ZERO = { reach: 7.1, damage: 90, chilledDamage: 135, freeze: 3.6, cooldown: 21 } as const;
+export const FROZEN_ORB = { radius: 1.85, hitGrowth: 4, maxGrowth: 60 } as const;
+export const GUST_FORWARD_DOT = .53;
 export const RUN_XP_PERCENT = 2;
 export const AREA_PERCENT = 8;
 export const HASTE_COOLDOWN_PERCENT = 4;
@@ -271,7 +269,7 @@ const FROST_COMMON = [
   { id: 'blizzard', name: '눈보라', english: 'Blizzard', summary: '적이 모인 곳에 자동 시전', detail: '레벨업으로 습득합니다. 사거리 안에서 적이 가장 많이 모인 곳에 자동으로 4.5초 동안 눈보라를 내립니다. 범위 안의 적은 주기적으로 피해를 받고 느려집니다.', cooldown: 12 },
   { id: 'blink', name: '점멸', english: 'Blink', summary: '위험할 때 안전한 곳으로', detail: '레벨업으로 습득합니다. 얼지 않은 적이 접근하면 주변을 살펴 더 안전한 방향으로 자동 순간이동하고 잠시 무적이 됩니다. 안전할 때는 사용하지 않습니다.', cooldown: 5.8 },
   { id: 'barrier', name: '얼음 보호막', english: 'Ice Barrier', summary: '피해 흡수 · 주기적 주변 둔화', detail: '피해를 받기 직전에 자동으로 발동해 최대 6초 동안 피해를 36까지 흡수합니다. 보호막이 남아 있는 동안 주기적으로 주변 적을 둔화시킵니다.', cooldown: 14 },
-  { id: 'orb', name: '얼어붙은 구슬', english: 'Frozen Orb', summary: '움직이는 냉기 구슬', detail: '가까운 적을 향해 발사됩니다. 구슬이 전장을 가로지르며 주변 적에게 반복 피해를 주고 이동 속도를 낮춥니다.', cooldown: 8.3 },
+  { id: 'orb', name: '얼어붙은 구슬', english: 'Frozen Orb', summary: '적중할수록 커지는 냉기 구슬', detail: `전장을 가로지르며 주변 적에게 반복 피해를 주고 이동 속도를 낮춥니다. 피해를 준 적 하나당 해당 구슬의 반경이 기본 반경의 ${FROZEN_ORB.hitGrowth}%만큼, 최대 ${FROZEN_ORB.maxGrowth}%까지 커집니다.`, cooldown: 8.3 },
   { id: 'comet', name: '고드름 낙하', english: 'Icicle Fall', summary: '최대 3명에게 고드름 낙하', detail: '가까운 적 최대 3명을 겨냥합니다. 짧은 예고 후 고드름이 떨어져 대상과 바로 주변의 적에게 피해를 줍니다.', cooldown: 7.5 },
 ] as const;
 
@@ -300,7 +298,7 @@ const FROST_ADVANCED = [
   { id: 'absoluteZero', unlock: 'learn-absolute-zero', power: 'absolute-zero-power', rarity: 'unique', name: '절대 영도', english: 'Absolute Zero', summary: '강한 광역 빙결 · 이미 차가운 적은 추가 피해', detail: `범위 안에 적이 셋 이상이거나 보스가 있으면 전방을 강타해 ${ABSOLUTE_ZERO.freeze}초 동안 얼립니다. 이미 둔화·빙결된 적에게 더 큰 피해를 주되 상태이상을 소모하지 않습니다. 보스의 빙결 시간은 더 짧습니다.`, cooldown: ABSOLUTE_ZERO.cooldown },
   { id: 'glacialCollapse', unlock: 'learn-glacial-collapse', power: 'glacial-collapse-power', rarity: 'unique', name: '빙하 붕괴', english: 'Glacial Collapse', summary: '빙결을 소모해 파편 폭발을 일으킴', detail: '얼어붙은 적이 둘 이상 모였거나 보스가 얼면 발동합니다. 최대 네 대상의 빙결을 소모해 주변에 파편을 터뜨립니다. 얼어 있던 적은 더 큰 피해를 받으며, 빙결이 풀린 자리에 둔화가 남습니다.', cooldown: 19.5 },
   { id: 'chainLightning', unlock: 'learn-chain-lightning', power: 'chain-lightning-power', rarity: 'unique', name: '체인 라이트닝', english: 'Chain Lightning',
-    summary: '둔화·빙결을 소모하는 연쇄 번개', detail: `첫 적을 타격한 뒤 전방의 서로 다른 적에게 최대 ${CHAIN_LIGHTNING.bounces}번 튕깁니다. 비슷한 거리라면 둔화·빙결된 적에게 먼저 튕기며, 그 효과를 제거하고 ${CHAIN_LIGHTNING.amplify}배의 피해를 줍니다. 튕길 때마다 피해가 ${CHAIN_LIGHTNING.loss}% 감소합니다.`, cooldown: 13 },
+    summary: '전하를 모아 순서대로 튕기는 번개', detail: `기본 피해 ${CHAIN_LIGHTNING.damage}. 첫 적을 타격한 뒤 전방의 서로 다른 적에게 최대 ${CHAIN_LIGHTNING.bounces}번 튕깁니다. 비슷한 거리라면 둔화·빙결된 적을 우선해 상태를 소모하고 ${CHAIN_LIGHTNING.amplify}배 피해를 줍니다. 전이할 때마다 피해는 ${CHAIN_LIGHTNING.loss}% 감소합니다. 다른 주문의 치명타로 전하를 충전하면 다음 체인 라이트닝 전체의 피해가 ${CHAIN_LIGHTNING.chargePercent}% 증가합니다. 전하는 중첩되지 않습니다.`, cooldown: 13 },
 ] as const;
 
 const FIRE_ADVANCED = [
@@ -312,7 +310,7 @@ const FIRE_ADVANCED = [
   { id: 'meteor', unlock: 'learn-meteor', power: 'meteor-power', rarity: 'epic', name: '홍련 운석', english: 'Crimson Meteor', summary: '넓은 범위에 운석과 작열', detail: '적이 모인 곳을 예고한 뒤 큰 운석을 떨어뜨립니다. 범위 안의 적은 한꺼번에 강한 피해와 작열을 받습니다.', cooldown: 12.5 },
   { id: 'cinderVortex', unlock: 'learn-cinder-vortex', power: 'cinder-vortex-power', rarity: 'epic', name: '잿불 소용돌이', english: 'Cinder Vortex', summary: '시전자와 함께 움직이는 불바람', detail: `${CINDER_VORTEX.duration}초 동안 시전자를 따라 움직이는 불바람이 전방 ${CINDER_VORTEX.reach}m의 적을 반복 공격합니다. 아직 타지 않는 적에게는 더 강한 피해를 주고 작열을 남깁니다.`, cooldown: 12.8 },
   { id: 'supernova', unlock: 'learn-supernova', power: 'supernova-power', rarity: 'unique', name: '홍련 초신성', english: 'Crimson Supernova', summary: '강한 광역 폭발에 작열 피해 추가', detail: '작열 중인 적이 모이거나 보스에 충분한 작열이 쌓이면 발동합니다. 강한 폭발 피해에 소모한 작열의 일부를 더합니다. 한곳에 작열이 아주 많이 쌓이면 추가 피해의 증가폭은 줄어듭니다. 폭발은 새 작열을 만들지 않습니다.', cooldown: 20 },
-  { id: 'infernoHeart', unlock: 'learn-inferno-heart', power: 'inferno-heart-power', rarity: 'unique', name: '용광의 심장', english: 'Inferno Heart', summary: `강한 불꽃 파동 후 새 작열 피해 ${INFERNO_BURN_BOOST_PERCENT}% 증폭`, detail: `적이 여럿 모이거나 가까이에 보스가 있으면 넓은 불꽃 파동으로 공격합니다. 파동을 포함해, 발동 후 6초 동안 새로 남기는 작열 피해가 ${INFERNO_BURN_BOOST_PERCENT}% 증가합니다. 이때 추가로 입힌 작열 피해는 용광의 심장에 집계됩니다.`, cooldown: 18 },
+  { id: 'infernoHeart', unlock: 'learn-inferno-heart', power: 'inferno-heart-power', rarity: 'unique', name: '용광의 심장', english: 'Inferno Heart', summary: `강한 불꽃 파동 후 새 작열 피해 ${INFERNO_BURN_BOOST_PERCENT}% 증폭`, detail: `적이 여럿 모이거나 가까이에 보스가 있으면 넓은 불꽃 파동으로 공격합니다. 파동을 포함해, 발동 후 기본 ${INFERNO_HEART.duration}초 동안 새로 남기는 작열 피해가 ${INFERNO_BURN_BOOST_PERCENT}% 증가합니다. 이때 추가로 입힌 작열 피해는 용광의 심장에 집계됩니다. 전용 강화로 증폭 시간을 늘릴 수 있습니다.`, cooldown: 18 },
 ] as const;
 
 export const SPELLS = [...FROST_COMMON, ...FROST_ADVANCED] as const;
@@ -437,6 +435,7 @@ export const UPGRADES = [
   { id: 'fire-ward-power', name: '뜨거운 방벽', description: `타오르는 방벽의 주변 피해가 ${SPELL_DAMAGE_PERCENT}% 증가합니다.`, icon: 'fireBarrier', max: null, requires: 'fireBarrier' },
   { id: 'scorch', name: '이글거리는 불씨', description: '화염구와 불덩이 작렬의 치명타 확률이 7%p 증가합니다.', icon: 'combustion', max: 3, requires: 'fireball' },
   { id: 'fire-ward', name: '꺼지지 않는 방벽', description: '타오르는 방벽이 피해를 12 더 흡수합니다.', icon: 'fireBarrier', max: 3, requires: 'fireBarrier' },
+  { id: 'inferno-heart-duration', name: '타오르는 심장', description: `용광의 심장이 새 작열을 강화하는 시간이 단계당 기본 지속시간의 ${INFERNO_HEART.durationStep}%만큼 늘어납니다.`, icon: 'infernoHeart', max: null, requires: 'infernoHeart' },
   { id: 'haste', name: '시간의 균열', description: `모든 자동 주문의 재사용 대기시간이 단계당 ${HASTE_COOLDOWN_PERCENT}% 감소합니다.`, icon: 'blink', max: 3 },
   { id: 'stride', name: '가벼운 발걸음', description: '이동 속도가 12% 빨라지고 점멸 거리가 늘어납니다.', icon: 'wind', max: 3 },
   { id: 'magnet', name: '눈꽃 자석', description: '경험치 결정을 끌어오는 범위가 40% 넓어집니다.', icon: 'gem', max: 3 },

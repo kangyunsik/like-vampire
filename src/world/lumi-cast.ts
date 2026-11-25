@@ -17,8 +17,20 @@ const high: readonly Stroke[] = [
   carry, [.15, -.37, -.15, .21, -.46, .32], [.37, -.34, -.17, .51, 1.05, .17],
   [.62, -.27, -.43, .41, .78, .03], rest,
 ];
-const highCasts = new Set<Spell>(['blizzard', 'comet', 'meteor', 'whiteout', 'iceBloom', 'winterMoon', 'glacierWall', 'auroraStrike', 'chainLightning']);
-const wideCasts = new Set<Spell>(['nova', 'barrier', 'fireBarrier', 'absoluteZero', 'glacialCollapse', 'combustion', 'supernova', 'infernoHeart', 'cinderVortex', 'frostGale']);
+const fan: readonly Stroke[] = [
+  carry, [.11, -.48, -.23, .12, -.28, .64], [STAFF_RELEASE_PHASE, -.36, -.19, .56, .72, .27],
+  [.48, -.09, -.31, .59, .59, -.56], [.70, -.15, -.39, .38, .21, -.35], rest,
+];
+const jab: readonly Stroke[] = [
+  carry, [.09, -.29, -.37, .11, -.37, .19], [STAFF_RELEASE_PHASE, -.22, -.23, .62, 1.26, .10],
+  [.43, -.31, -.18, .42, .98, .16], [.67, -.26, -.36, .35, .46, -.05], rest,
+];
+const arc: readonly Stroke[] = [
+  carry, [.15, -.35, -.07, .21, -.43, .29], [STAFF_RELEASE_PHASE, -.31, -.09, .55, 1.03, .12],
+  [.56, -.24, -.29, .51, .78, -.24], [.74, -.30, -.35, .31, .39, -.15], rest,
+];
+const highCasts = new Set<Spell>(['blizzard', 'comet', 'meteor', 'whiteout', 'iceBloom', 'winterMoon', 'glacierWall', 'auroraStrike']);
+const wideCasts = new Set<Spell>(['nova', 'barrier', 'fireBarrier', 'absoluteZero', 'glacialCollapse', 'combustion', 'supernova', 'infernoHeart', 'cinderVortex']);
 const upBone = new T.Vector3(0, 1, 0), acrossPalm = new T.Vector3(1, 0, 0);
 const smooth = (t: number) => t * t * (3 - 2 * t);
 
@@ -26,6 +38,7 @@ type CastRig = {
   grip?: readonly [number, number, number];
   spellcast?: T.AnimationClip;
 };
+type Gait = { weight: number; phase: number; side: number; forward: number };
 
 export function makeLumiCast(
   actor: T.Group, bone: (name: string) => T.Bone, staff: T.Group, staffScale: number, rig: CastRig = {},
@@ -84,19 +97,32 @@ export function makeLumiCast(
     orient(forearm, flex.subVectors(solved, elbow).normalize());
   }
 
+  function lean(joint: T.Bone, x: number, y: number, z: number) {
+    joint.parent!.getWorldQuaternion(parentInverse).invert().multiply(actorRotation);
+    turn.copy(parentInverse).invert();
+    desired.setFromEuler(angles.set(x, y, z, 'YXZ')).premultiply(parentInverse).multiply(turn);
+    joint.quaternion.premultiply(desired);
+  }
+
   return {
     restore() { for (const [joint, rotation] of base) joint.quaternion.copy(rotation); },
     capture() { for (const [joint, rotation] of base) rotation.copy(joint.quaternion); },
-    apply(time: number, casting: number, spell: Spell, aimSide: number, running: number, showcase = false) {
-      const phase = casting > 0 && spell !== 'blink' ? 1 - T.MathUtils.clamp(casting / CAST_TIMES[spell], 0, 1) : 0;
-      const broad = wideCasts.has(spell);
-      const keys = highCasts.has(spell) ? high : broad ? sweep : flick;
+    apply(time: number, casting: number, spell: Spell, aimSide: number, gait: Gait, showcase = false, hurt = false) {
+      const progress = casting > 0 && spell !== 'blink' ? 1 - T.MathUtils.clamp(casting / CAST_TIMES[spell], 0, 1) : 0;
+      const cone = spell === 'emberFan' || spell === 'frostGale';
+      const immediate = cone || spell === 'fireBlast' || spell === 'chainLightning';
+      // Hitscan spells snap through anticipation early and spend more time recovering.
+      // Projectiles keep the authored release fraction used by the simulation.
+      const phase = !immediate ? progress : progress < .14 ? progress * STAFF_RELEASE_PHASE / .14
+        : STAFF_RELEASE_PHASE + (progress - .14) * (1 - STAFF_RELEASE_PHASE) / .86;
+      const broad = cone || wideCasts.has(spell);
+      const keys = cone ? fan : spell === 'fireBlast' ? jab : spell === 'chainLightning' ? arc : highCasts.has(spell) ? high : broad ? sweep : flick;
       let upperKey = 1;
       while (upperKey < keys.length - 1 && phase > keys[upperKey][0]) upperKey++;
       const a = keys[upperKey - 1], b = keys[upperKey];
       const t = smooth((phase - a[0]) / (b[0] - a[0]));
       const envelope = smooth(Math.min(1, phase * 4.6, (1 - phase) * 3.4));
-      const sway = Math.sin(time * 8) * running * (1 - envelope);
+      const sway = Math.sin(gait.phase * Math.PI * 2) * gait.weight * (1 - envelope);
       const steer = T.MathUtils.clamp(aimSide, -1, 1) * envelope;
       const breath = showcase ? Math.sin(time * 2.35) : 0;
       const flourish = showcase ? T.MathUtils.smoothstep(Math.sin(time * .98 - .55), .18, .91) : 0;
@@ -108,7 +134,7 @@ export function makeLumiCast(
 
       actor.getWorldQuaternion(actorRotation);
       actor.getWorldScale(actorScale);
-      const clipBlend = authored.length ? envelope * .83 : 0;
+      const clipBlend = authored.length ? envelope * (immediate ? .35 : .67 - gait.weight * .15) : 0;
       if (spellcast && clipBlend > 0) {
         const release = .34;
         const sampleTime = phase < STAFF_RELEASE_PHASE
@@ -118,18 +144,24 @@ export function makeLumiCast(
           joint.quaternion.slerp(gesture.fromArray(sample.evaluate(sampleTime * spellcast.duration)), clipBlend);
         }
       }
-      chest.rotateY(envelope * .10 + steer * .09);
-      chest.rotateX(envelope * .060);
+      const recoil = immediate ? Math.sin(Math.PI * T.MathUtils.smoothstep(phase, .25, .65)) : 0;
+      lean(chest, gait.forward * .10 + envelope * .085 - recoil * .095, sway * .06 + envelope * .11 + steer * .20,
+        -gait.side * .20 + (hurt ? -.072 : 0) - (cone ? .13 : .040) * envelope);
+      lean(head, -gait.forward * .06 - envelope * .043, steer * .21, gait.side * .095);
       if (showcase) {
         chest.rotateZ(breath * .027 - flourish * .050);
         chest.rotateY(flourish * .11 + Math.sin(time * .95) * .056);
         head.rotateY(-.19 * flourish + .09 * Math.sin(time * .98 - 1));
         head.rotateX(.11 * flourish - breath * .038);
       }
-      bendArm(upper, lower, palm, holdOffset, -1, .82 + .18 * envelope - .64 * clipBlend);
+      bendArm(upper, lower, palm, holdOffset, -1, .82 + .18 * envelope - .54 * clipBlend);
       if (envelope > .001) {
-        offOffset.set(broad ? .43 : .31, broad ? -.32 : -.43, broad ? .36 : .10);
-        bendArm(offUpper, offLower, offPalm, offOffset, 1, envelope * (broad ? .84 : .30) * (1 - clipBlend));
+        const support = broad || spell === 'chainLightning';
+        offOffset.set(support ? .49 - steer * .06 : .31, support ? -.32 + recoil * .13 : -.43, support ? .36 : .10 + recoil * .11);
+        bendArm(offUpper, offLower, offPalm, offOffset, 1, envelope * (support ? .86 : .40) * (1 - clipBlend));
+      } else if (Math.abs(gait.side) > .05) {
+        offOffset.set(.36 + Math.abs(gait.side) * .16, -.47 + Math.abs(sway) * .06, .08 - sway * .10);
+        bendArm(offUpper, offLower, offPalm, offOffset, 1, Math.abs(gait.side) * .46);
       } else if (flourish > .001) {
         offOffset.set(.35 + .10 * flourish, -.45 + .22 * flourish, .11 + .20 * flourish);
         bendArm(offUpper, offLower, offPalm, offOffset, 1, flourish * .78);

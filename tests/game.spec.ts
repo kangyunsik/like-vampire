@@ -37,6 +37,57 @@ async function beginRun(page: Page, byKeyboard = false) {
   return game;
 }
 
+async function observeAudio(page: Page) {
+  return page.evaluateHandle(async () => {
+    const { GameAudio } = await import(`${location.origin}/src/audio.ts`);
+    const heard: { cue: string; duration: number }[] = [];
+    let cue = '';
+    const play = GameAudio.prototype.play, make = AudioContext.prototype.createBufferSource;
+    GameAudio.prototype.play = function (this: import('../src/audio').GameAudio, ...args: Parameters<typeof play>) {
+      cue = args[0];
+      try { play.apply(this, args); }
+      finally { cue = ''; }
+    };
+    AudioContext.prototype.createBufferSource = function () {
+      const source = make.call(this), start = source.start.bind(source);
+      source.start = (...args) => {
+        heard.push({ cue, duration: source.buffer?.duration ?? 0 });
+        start(...args);
+      };
+      return source;
+    };
+    return heard;
+  });
+}
+
+async function observeWarnings(page: Page, names: string[]) {
+  return page.evaluateHandle(async (names) => {
+    const { World } = await import(`${location.origin}/src/world/scene.ts`);
+    const draw = World.prototype.draw;
+    const seen = { counts: {} as Record<string, number>, labels: [] as string[] };
+    World.prototype.draw = function (this: World, ...args: Parameters<World['draw']>) {
+      const landed = draw.apply(this, args);
+      const { scene } = this as unknown as { scene: import('three').Scene };
+      const visible: Record<string, number> = {};
+      for (const object of scene.children) {
+        if (!object.visible || (object.name !== 'boss-telegraph' && object.name !== 'boss-charge-telegraph')) continue;
+        const cue = object.userData.cue as string;
+        visible[cue] = (visible[cue] ?? 0) + 1;
+      }
+      for (const [cue, count] of Object.entries(visible)) seen.counts[cue] = Math.max(seen.counts[cue] ?? 0, count);
+      return landed;
+    };
+    const context = document.querySelector<HTMLCanvasElement>('#damage-canvas')!.getContext('2d')!;
+    const text = context.fillText.bind(context);
+    context.fillText = (value, x, y, width) => {
+      if ((names.some((name) => value.includes(name)) || /· \d+(?:\.\d+)?초$/.test(value)) && !seen.labels.includes(value)) seen.labels.push(value);
+      if (width === undefined) text(value, x, y);
+      else text(value, x, y, width);
+    };
+    return seen;
+  }, names);
+}
+
 test('the spellbook, guide and persistent audio settings work', async ({ page }) => {
   await page.goto('/');
   const errors: string[] = [];
@@ -93,6 +144,24 @@ test('expedition map markers, NPC interaction and quest gold work in the game', 
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   const game = await beginRun(page);
+  const markers = await page.evaluateHandle(async () => {
+    const { World } = await import(`${location.origin}/src/world/scene.ts`);
+    const draw = World.prototype.draw;
+    const seen = { available: 0, active: 0, color: '' };
+    World.prototype.draw = function (this: World, ...args: Parameters<World['draw']>) {
+      draw.apply(this, args);
+      const { scene } = this as unknown as { scene: import('three').Scene };
+      seen.available = seen.active = 0;
+      seen.color = '';
+      for (const npc of scene.children.filter((child) => child.name === 'quest-npc')) {
+        if (npc.getObjectByName('quest-available')?.visible) seen.available++;
+        const active = npc.getObjectByName('quest-in-progress') as import('three').Sprite | undefined;
+        if (active?.visible) { seen.active++; seen.color = active.material.color.getHexString(); }
+      }
+    };
+    return seen;
+  });
+  await expect.poll(() => markers.jsonValue()).toEqual({ available: 13, active: 0, color: '' });
   await game.evaluate((run) => {
     run.player.immunity = 200;
     run.supplies.push({ x: 100, z: 80, kind: 'heart', expires: 50 });
@@ -115,12 +184,21 @@ test('expedition map markers, NPC interaction and quest gold work in the game', 
     run.level = 50;
   });
   await expect(page.getByRole('button', { name: '대화 F' })).toBeVisible();
+  await page.keyboard.down('f');
+  try {
+    await expect(dialog).toHaveAccessibleName('흩어진 수정');
+    await expect(dialog).toContainText('무작위 3분 버프');
+    await expect(dialog.getByRole('button', { name: '의뢰 수락' })).toHaveAttribute('aria-keyshortcuts', 'F');
+    await page.keyboard.down('f');
+    expect(await game.evaluate((run) => run.quest)).toBeNull();
+    await expect(dialog).toBeVisible();
+  } finally {
+    await page.keyboard.up('f');
+  }
   await page.keyboard.press('f');
-  await expect(dialog).toHaveAccessibleName('흩어진 수정');
-  await expect(dialog).toContainText('무작위 3분 버프');
-  await dialog.getByRole('button', { name: '의뢰 수락' }).click();
   await expect(dialog).toBeHidden();
   await expect(page.locator('#quest-detail')).toHaveText('0 / 35개 · 2 G');
+  await expect.poll(() => markers.jsonValue()).toEqual({ available: 0, active: 1, color: 'b7b7b7' });
   await game.evaluate((run) => {
     run.supplies.push({ x: run.player.x, z: run.player.z, kind: 'magnet', expires: run.time + 20 });
     for (let i = 0; i < 35; i++) run.pickups.push({ x: -240, z: -200, value: 3, age: 1, phase: 0, tier: 'normal' });
@@ -131,6 +209,7 @@ test('expedition map markers, NPC interaction and quest gold work in the game', 
   await expect(dialog.locator('.quest-reward-grid')).toContainText('경험치+85');
   await expect(dialog.locator('.quest-reward-grid')).toContainText('골드+2 G');
   await expect(dialog.locator('.quest-reward-grid')).toContainText('3분 버프');
+  await expect.poll(() => markers.jsonValue()).toEqual({ available: 12, active: 0, color: '' });
   await dialog.getByRole('button', { name: '계속하기' }).click();
   await page.keyboard.press('g');
   await expect(dialog).toHaveAccessibleName('공용 특성');
@@ -151,31 +230,14 @@ test('expedition map markers, NPC interaction and quest gold work in the game', 
   await page.keyboard.press('m');
   await expect(dialog.locator('[data-map-marker="signal"]')).toHaveCount(3);
   expect(errors).toEqual([]);
+  await markers.dispose();
   await game.dispose();
 });
 
-test('a ranged elite renders its warning and plays distinct warning and impact sounds', async ({ page }) => {
+test('a ranged elite renders its warning without text and plays distinct warning and impact sounds', async ({ page }) => {
   await page.goto('/');
-  const observed = await page.evaluateHandle(() => {
-    const pitches: number[] = [], labels: string[] = [];
-    const make = AudioContext.prototype.createOscillator;
-    AudioContext.prototype.createOscillator = function () {
-      const node = make.call(this), set = node.frequency.setValueAtTime.bind(node.frequency);
-      node.frequency.setValueAtTime = (frequency, time) => {
-        pitches.push(frequency);
-        return set(frequency, time);
-      };
-      return node;
-    };
-    const context = document.querySelector<HTMLCanvasElement>('#damage-canvas')!.getContext('2d')!;
-    const text = context.fillText.bind(context);
-    context.fillText = (value, x, y, width) => {
-      if (value.startsWith('번개 낙점') && !labels.length) labels.push(value);
-      if (width === undefined) text(value, x, y);
-      else text(value, x, y, width);
-    };
-    return { pitches, labels };
-  });
+  const observed = await observeWarnings(page, ['번개 낙점']);
+  const played = await observeAudio(page);
   const game = await beginRun(page);
   await game.evaluate((run, start) => {
     run.time = start - .01;
@@ -191,9 +253,102 @@ test('a ranged elite renders its warning and plays distinct warning and impact s
     run.enemies = [elite];
     run.hazards.length = 0;
   });
-  await expect.poll(() => observed.evaluate(({ labels }) => labels[0])).toMatch(/번개 낙점 · [0-9.]+초/);
-  await expect.poll(() => observed.evaluate(({ pitches }) => pitches.includes(1278))).toBe(true);
-  await expect.poll(() => observed.evaluate(({ pitches }) => pitches.indexOf(209) > pitches.indexOf(1278))).toBe(true);
+  await expect.poll(() => observed.evaluate(({ counts }) => counts.stormShot)).toBe(1);
+  await expect.poll(() => played.evaluate((heard) => heard.filter(({ cue, duration }) => duration > 0 &&
+    (cue === 'warning-elite' || cue === 'blast-elite')).map(({ cue }) => cue))).toEqual(['warning-elite', 'blast-elite']);
+  expect(await observed.evaluate(({ labels }) => labels)).toEqual([]);
+  await game.dispose();
+  await observed.dispose();
+  await played.dispose();
+});
+
+test('snow footsteps alternate during a strafe without turning and obey the sound toggle', async ({ page }) => {
+  await page.goto('/');
+  const played = await observeAudio(page);
+  const game = await beginRun(page);
+  const snowSounds = () => played.evaluate((heard) => heard.filter(({ cue, duration }) => cue.startsWith('snow-') && duration > 0).map(({ cue }) => cue));
+  await game.evaluate((run) => {
+    run.enemies.length = 0;
+    run.spells.clear();
+    Object.assign(run, { nextSpawn: Infinity });
+  });
+  const start = await game.evaluate(({ player }) => ({ x: player.x, z: player.z, heading: player.heading }));
+  await page.keyboard.down('a');
+  await expect.poll(async () => (await snowSounds()).length).toBeGreaterThanOrEqual(3);
+  await page.keyboard.up('a');
+  const footsteps = await snowSounds();
+  expect(new Set(footsteps.slice(0, 2))).toEqual(new Set(['snow-left', 'snow-right']));
+  expect(await game.evaluate(({ player }) => player.heading)).toBe(start.heading);
+  expect(await game.evaluate(({ player }, x) => Math.abs(player.x - x), start.x)).toBeGreaterThan(.5);
+
+  const sound = page.getByRole('button', { name: '효과음' });
+  await sound.click();
+  await expect(sound).toHaveAttribute('aria-pressed', 'false');
+  const quietAt = (await snowSounds()).length;
+  const z = await game.evaluate((run) => run.player.z);
+  await page.keyboard.down('s');
+  await expect.poll(() => game.evaluate((run, z) => Math.abs(run.player.z - z), z)).toBeGreaterThan(3.8);
+  await page.keyboard.up('s');
+  expect(await snowSounds()).toHaveLength(quietAt);
+  await game.dispose();
+  await played.dispose();
+});
+
+test('charged Chain Lightning draws a separate arc and damage number for each resolved impact', async ({ page }) => {
+  await page.goto('/');
+  const observed = await page.evaluateHandle(async () => {
+    const { World } = await import(`${location.origin}/src/world/scene.ts`);
+    const add = World.prototype.addEvent, draw = World.prototype.draw;
+    const state = { impact: [] as [number, number, boolean, boolean][], numbers: [] as [number, string][], rendered: false };
+    type Art = { scene: import('three').Scene; numbers: { z: number; text: string }[] };
+    World.prototype.addEvent = function (this: World, ...args: Parameters<World['addEvent']>) {
+      const [event] = args, art = this as unknown as Art;
+      const before = new Set(art.scene.children.map(({ id }) => id));
+      add.apply(this, args);
+      if (event.kind === 'chain-lightning-hit') {
+        const mesh = art.scene.children.find((node) => !before.has(node.id) && node.name === 'chain-lightning-impact');
+        state.impact.push([event.hop, event.z, event.charged, mesh?.position.z === event.z]);
+      }
+      if (event.kind === 'strike' && event.spell === 'chainLightning') {
+        const number = art.numbers.at(-1);
+        if (number?.z === event.z) state.numbers.push([number.z, number.text]);
+      }
+    };
+    World.prototype.draw = function (this: World, ...args: Parameters<World['draw']>) {
+      const result = draw.apply(this, args);
+      state.rendered ||= Boolean((this as unknown as Art).scene.getObjectByName('chain-lightning-impact')?.visible);
+      return result;
+    };
+    return state;
+  });
+  const game = await beginRun(page);
+  await game.evaluate((run) => {
+    const enemy = run.enemies[0];
+    Object.assign(run, { nextSpawn: Infinity, rng: () => 0 });
+    Object.assign(run.player, { x: 0, z: 0, heading: Math.PI, casting: 0 });
+    Object.assign(enemy, { x: 0, z: -3, speed: 0, hp: 1000, maxHp: 1000 });
+    run.enemies = [enemy];
+    run.shots = [];
+    run.spells.add('chainLightning').add('frostGale');
+    run.cooldown.bolt = run.cooldown.chainLightning = 60;
+    run.cast('frostGale', null, { x: 0, z: 0 });
+  });
+  const effects = page.locator('#effect-status');
+  await expect(effects).toContainText('전하 충전 +20%');
+  await game.evaluate((run) => {
+    const enemy = run.enemies[0];
+    Object.assign(run, { rng: () => .5 });
+    run.enemies = [-4, -6.2, -8.4].map((z, i) => ({
+      ...enemy, id: 50 + i, z, hp: 1000, maxHp: 1000, slow: 0, frozen: 0, chills: undefined, freezeSource: undefined,
+    }));
+    run.cooldown.chainLightning = 0;
+    run.cast('chainLightning', null, { x: 0, z: 0 });
+  });
+  await expect(effects).not.toContainText('전하 충전');
+  await expect.poll(() => observed.jsonValue()).toMatchObject({
+    impact: [[0, -4, true, true], [1, -6.2, true, true], [2, -8.4, true, true]],
+    numbers: [[-4, '139'], [-6.2, '125'], [-8.4, '113']], rendered: true,
+  });
   await game.dispose();
   await observed.dispose();
 });
@@ -434,20 +589,7 @@ test('Icicle Fall casts with audio on without freezing; spell cards follow acqui
   await page.addInitScript(() => { Math.random = () => .9999; });
   await page.goto('/');
   await expect(page.getByRole('button', { name: '효과음' })).toHaveAttribute('aria-pressed', 'true');
-  const played = await page.evaluateHandle(() => {
-    const pitches: number[] = [];
-    const make = AudioContext.prototype.createOscillator;
-    AudioContext.prototype.createOscillator = function () {
-      const node = make.call(this);
-      const set = node.frequency.setValueAtTime.bind(node.frequency);
-      node.frequency.setValueAtTime = (frequency, time) => {
-        pitches.push(frequency);
-        return set(frequency, time);
-      };
-      return node;
-    };
-    return pitches;
-  });
+  const played = await observeAudio(page);
   const game = await beginRun(page);
   await game.evaluate((run) => {
     run.enemies.length = 1;
@@ -462,9 +604,10 @@ test('Icicle Fall casts with audio on without freezing; spell cards follow acqui
   await dialog.locator('[data-upgrade="learn-comet"]').click();
   await expect(dialog).toBeHidden();
   await expect(page.locator('[data-spell="comet"]')).toHaveClass(/cooling/);
-  await expect.poll(() => played.evaluate((pitches) => pitches.includes(1510))).toBe(true);
+  await expect.poll(() => played.evaluate((heard) => heard.some(({ cue, duration }) => cue === 'ice-lance' && duration > 0))).toBe(true);
   await expect.poll(() => game.evaluate((run) => run.enemies[0].hp)).toBe(463);
-  await expect.poll(() => played.evaluate((pitches) => pitches.includes(2030))).toBe(true);
+  await expect.poll(() => played.evaluate((heard) => heard.filter(({ cue }) => cue === 'ice-lance' || cue === 'ice-impact').map(({ cue }) => cue)))
+    .toEqual(['ice-lance', 'ice-impact']);
   await expect(page.locator('#elapsed')).not.toHaveText('00:00');
 
   for (const [id, before] of [['barrier', 9], ['orb', 14]] as const) {
@@ -581,6 +724,30 @@ test('Lumi breathes, turns her head and raises her wand on the main menu', async
   await expect(page.locator('#arena')).toHaveAttribute('data-state', 'menu');
   await expect.poll(() => idle.evaluate(({ head, wrist }) => Math.min(head, wrist)), { timeout: 8000 }).toBeGreaterThan(.10);
   await idle.dispose();
+});
+
+test('upgrade shops fit without scrolling in a short window and hold the background in place', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 500 });
+  await page.goto('/');
+  const dialog = page.getByRole('dialog');
+  const overflow = () => dialog.evaluate(async (el) => {
+    await document.fonts.ready;
+    return Math.max(el.scrollHeight - el.clientHeight, el.scrollWidth - el.clientWidth);
+  });
+  await page.getByRole('button', { name: '영구 강화', exact: true }).click();
+  await expect(dialog.locator('.permanent-card')).toHaveCount(9);
+  expect(await overflow()).toBeLessThanOrEqual(1);
+  await expect(page.locator('html')).toHaveCSS('overflow-y', 'hidden');
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(page.locator('html')).not.toHaveCSS('overflow-y', 'hidden');
+
+  const game = await beginRun(page);
+  await page.keyboard.press('g');
+  await expect(dialog).toHaveAccessibleName('공용 특성');
+  await expect(dialog.locator('[data-common-talent]')).toHaveCount(10);
+  expect(await overflow()).toBeLessThanOrEqual(1);
+  await game.dispose();
 });
 
 test('completed stages award persistent points to spend on permanent upgrades shared by both classes', async ({ page }) => {
@@ -729,17 +896,7 @@ test('all ten stage atmospheres continue in one world, with victory at 30 minute
 
   await game.evaluate((run, time) => { run.time = time - .01; }, STAGE_TIME * 2 + WAVE_TIME * (WAVE_COUNT - 1));
   await expect(page.locator('#wave-toast')).toContainText('달서리 여왕 등장!');
-  const bossText = await page.evaluateHandle(() => {
-    const context = document.querySelector<HTMLCanvasElement>('#damage-canvas')!.getContext('2d')!;
-    const seen: string[] = [];
-    const fillText = context.fillText.bind(context);
-    context.fillText = (text, x, y, maxWidth) => {
-      if (text.startsWith('달서리 삼연타') && !seen.length) seen.push(text);
-      if (maxWidth === undefined) fillText(text, x, y);
-      else fillText(text, x, y, maxWidth);
-    };
-    return seen;
-  });
+  const warnings = await observeWarnings(page, ['달서리 삼연타']);
   await game.evaluate((run) => {
     const queen = run.enemies.find((enemy) => enemy.kind === 'queen')!;
     Object.assign(run.player, { x: 0, z: 0, immunity: 15 });
@@ -747,10 +904,10 @@ test('all ten stage atmospheres continue in one world, with victory at 30 minute
     run.enemies = [queen];
     run.hazards.length = 0;
   });
-  await expect.poll(() => game.evaluate((run) => run.hazards.length)).toBe(3);
-  await expect.poll(() => bossText.evaluate((texts) => texts[0])).toMatch(/달서리 삼연타 · [0-9.]+초/);
+  await expect.poll(() => warnings.evaluate(({ counts }) => counts.queen)).toBe(3);
   await page.screenshot({ path: test.info().outputPath('frost-queen-warning.png') });
-  await bossText.dispose();
+  expect(await warnings.evaluate(({ labels }) => labels)).toEqual([]);
+  await warnings.dispose();
   for (const [index, stage] of STAGES.entries()) {
     if (index < 3) continue;
     await game.evaluate((run, boundary) => { run.time = boundary - .01; }, STAGE_TIME * index);
@@ -1166,6 +1323,63 @@ for (const [id, model, kind, grip] of [
   });
 }
 
+for (const [id, prefix, spell] of [['frost', 'mixamorig', 'chainLightning'], ['fire', '', 'fireBlast']] as const) {
+  test(`${id} has lateral and backward footwork and a separate upper-body release`, async ({ page }) => {
+    await page.goto('/');
+    const gait = await page.evaluate(async ({ id, prefix, spell }) => {
+      const { makePlayableMage } = await import(`${location.origin}/src/world/lumi-meshy.ts`);
+      const { CAST_TIMES } = await import(`${location.origin}/src/data.ts`) as typeof import('../src/data');
+      async function measure(side: number, forward: number, casting: boolean) {
+        const mage = makePlayableMage(id);
+        if (!await mage.ready) throw new Error(`Could not load ${id}`);
+        const left = mage.root.getObjectByName(`${prefix}LeftFoot`)!;
+        const right = mage.root.getObjectByName(`${prefix}RightFoot`)!;
+        const toe = mage.root.getObjectByName(`${prefix}LeftToeBase`)!;
+        const staff = mage.root.getObjectByName('lumi-staff-tip')!;
+        const position = (object: import('three').Object3D) => mage.root.worldToLocal(object.getWorldPosition(mage.root.position.clone())).toArray();
+        const samples: { left: number[]; right: number[]; staff: number[]; toe: number }[] = [], lands: string[] = [];
+        for (let frame = 0; frame < 111; frame++) {
+          const time = frame / 60, age = (frame - 45) / 60;
+          const foot = mage.animate({ time, dt: 1 / 60, side, forward,
+            casting: casting && age >= 0 ? Math.max(0, CAST_TIMES[spell] - age) : 0, pose: spell });
+          if (foot && frame >= 40) lands.push(foot);
+          if (frame >= 40) {
+            const leftFoot = position(left);
+            samples.push({ left: leftFoot, right: position(right), staff: position(staff), toe: position(toe)[2] - leftFoot[2] });
+          }
+        }
+        return { samples, lands };
+      }
+      const sideways = await measure(5.35, 0, false), reverse = await measure(0, -5.35, false);
+      const casting = await measure(5.35, 0, true);
+      const range = (values: number[]) => Math.max(...values) - Math.min(...values);
+      const between = (a: number[], b: number[]) => Math.hypot(...a.map((v, i) => v - b[i]));
+      return {
+        side: range(sideways.samples.map(({ left }) => left[0])),
+        sideDrift: range(sideways.samples.map(({ left }) => left[2])),
+        backward: range(reverse.samples.map(({ left }) => left[2])),
+        stepLift: range(sideways.samples.map(({ left }) => left[1])),
+        minGap: Math.min(...sideways.samples.map(({ left, right }) => left[0] - right[0])),
+        toes: Math.min(...sideways.samples.map(({ toe }) => toe)),
+        steps: sideways.lands,
+        castMovement: Math.max(...casting.samples.map(({ staff }, i) => between(staff, sideways.samples[i].staff))),
+        footDifference: Math.max(...casting.samples.map(({ left, right }, i) => Math.max(
+          between(left, sideways.samples[i].left), between(right, sideways.samples[i].right)))),
+      };
+    }, { id, prefix, spell });
+    expect(gait.side).toBeGreaterThan(.64);
+    expect(gait.sideDrift).toBeLessThan(.17);
+    expect(gait.backward).toBeGreaterThan(.88);
+    expect(gait.stepLift).toBeGreaterThan(.16);
+    expect(gait.minGap).toBeGreaterThan(.14);
+    expect(gait.toes).toBeGreaterThan(.06);
+    expect(gait.steps.length).toBeGreaterThan(3);
+    expect(gait.steps.every((step, i) => i === 0 || gait.steps[i - 1] !== step)).toBe(true);
+    expect(gait.castMovement).toBeGreaterThan(.42);
+    expect(gait.footDifference).toBeLessThan(.00001);
+  });
+}
+
 test('the Meshy frost effects render detailed ice, a glacial fracture, airborne shards and lingering mist', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -1241,17 +1455,24 @@ for (const [classId, book] of [['frost', SPELLS], ['fire', FIRE_SPELLS]] as cons
       const { World } = await import(`${location.origin}/src/world/scene.ts`);
       const add = World.prototype.addEvent, draw = World.prototype.draw;
       const seen = { casts: new Set<string>(), molten: false, phoenix: false, field: false, ward: false,
-        explosion: false, craterPlumes: false };
+        explosion: false, craterPlumes: false, cone: false, fireBlast: false };
       type Art = { scene: import('three').Scene; fireShots: import('three').InstancedMesh;
         meteor: import('three').InstancedMesh; phoenix: import('three').InstancedMesh };
       World.prototype.addEvent = function (this: World, ...args: Parameters<World['addEvent']>) {
         const [event] = args;
         const { scene } = this as unknown as Art;
-        const before = event.kind === 'cast' ? new Set(scene.children.map((object) => object.id)) : undefined;
+        const before = new Set(scene.children.map((object) => object.id));
         add.apply(this, args);
-        if (event.kind === 'cast' && scene.children.some((object) => !before!.has(object.id) &&
-          /spell-etch|spell-ribbon|spell-arc/.test(object.name))) {
+        const added = scene.children.filter((object) => !before.has(object.id));
+        if (event.kind === 'cast' && added.some((object) => /spell-etch|spell-ribbon|spell-arc/.test(object.name))) {
           seen.casts.add(event.spell);
+        }
+        if (event.kind === 'chain-lightning-hit' && added.some((object) => object.name === 'chain-lightning-impact')) seen.casts.add('chainLightning');
+        if (event.kind === 'cast' && (event.spell === 'frostGale' || event.spell === 'emberFan')) {
+          seen.cone ||= added.some((object) => /^(ember|frost)-cone-front$/.test(object.name) && object.scale.x === event.radius);
+        }
+        if (event.kind === 'spell-impact' && event.spell === 'fireBlast') {
+          seen.fireBlast ||= added.some((object) => object.name === 'fire-blast-core') && added.some((object) => object.name === 'fire-blast-pressure');
         }
         if (event.kind === 'spell-impact' && event.spell === 'meteor') seen.explosion = true;
       };
@@ -1303,6 +1524,7 @@ for (const [classId, book] of [['frost', SPELLS], ['fire', FIRE_SPELLS]] as cons
       }
     }
     expect(await observed.evaluate(({ field, ward }) => ({ field, ward }))).toEqual({ field: true, ward: true });
+    expect(await observed.evaluate(({ cone, fireBlast }) => ({ cone, fireBlast }))).toEqual({ cone: true, fireBlast: classId === 'fire' });
     expect(errors).toEqual([]);
     await game.dispose();
     await observed.dispose();
